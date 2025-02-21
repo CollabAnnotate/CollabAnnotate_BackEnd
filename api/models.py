@@ -40,41 +40,8 @@ class Label(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
 
-#class Annotation(models.Model):
-  #  dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
-   # image = models.ImageField(upload_to="annotations/", null=True, blank=True)
-    #label = models.CharField(max_length=100, default="Default Label")
-    #x_min = models.FloatField()
-   # y_min = models.FloatField()
-   # x_max = models.FloatField()
-   # y_max = models.FloatField()
-   # confidence = models.FloatField(default=1.0)
-   # created_by = models.ForeignKey(User, on_delete=models.CASCADE)
-   # created_at = models.DateTimeField(auto_now_add=True)
-   # validated = models.BooleanField(default=False)
-
-   # def __str__(self):
-    #    return f"{self.label} ({self.confidence:.2f})"
-
-#class Annotation(models.Model):
-  #  dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
-#    image = models.ImageField(upload_to="annotations/", null=True, blank=True)
-  #  label = models.CharField(max_length=100, default="Default Label")
- #   x_min = models.FloatField(default=0.0)  # Valeur par défaut
- #   y_min = models.FloatField(default=0.0)  # Valeur par défaut
-  #  x_max = models.FloatField(default=1.0)  # Valeur par défaut
-  #  y_max = models.FloatField(default=1.0)  # Valeur par défaut
-   # confidence = models.FloatField(default=1.0)
-    #created_by = models.ForeignKey(User, on_delete=models.CASCADE)
-    #created_at = models.DateTimeField(auto_now_add=True)
-    #validated = models.BooleanField(default=False)
-
-    #def __str__(self):
-     #   return f"{self.label} ({self.confidence:.2f})"
-    
-
 class Annotation(models.Model):
-    dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)  # Ce champ est obligatoire
+    dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
     image = models.ImageField(upload_to="annotations/", null=True, blank=True)
     label = models.CharField(max_length=100, default="Default Label")
     x_min = models.FloatField(default=0.0)
@@ -85,6 +52,39 @@ class Annotation(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     validated = models.BooleanField(default=False)
+    validation_status = models.CharField(max_length=20, choices=[("validé", "Validé"), ("rejeté", "Rejeté")], null=True, blank=True)
+    validation_comment = models.TextField(null=True, blank=True)
+    validated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="validated_annotations")
+    validated_at = models.DateTimeField(null=True, blank=True)
+
+class AnnotationHistory(models.Model):
+    MODIFICATION_TYPES = [
+        ('create', 'Création'),
+        ('update', 'Modification'),
+        ('delete', 'Suppression'),
+    ]
+
+    annotation = models.ForeignKey(Annotation, on_delete=models.CASCADE, related_name='history')
+    modified_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    modified_at = models.DateTimeField(auto_now_add=True)
+    modification_type = models.CharField(max_length=20, choices=MODIFICATION_TYPES)
+    
+    # Anciennes valeurs
+    previous_label = models.CharField(max_length=100, null=True, blank=True)
+    previous_x_min = models.FloatField(null=True, blank=True)
+    previous_y_min = models.FloatField(null=True, blank=True)
+    previous_x_max = models.FloatField(null=True, blank=True)
+    previous_y_max = models.FloatField(null=True, blank=True)
+    
+    comment = models.TextField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-modified_at']
+        verbose_name_plural = 'Annotation histories'
+
+    def __str__(self):
+        return f'Modification de {self.annotation} par {self.modified_by} le {self.modified_at}'
+
 class Validation(models.Model):
     annotation = models.ForeignKey(Annotation, on_delete=models.CASCADE)
     status = models.CharField(max_length=20, choices=[('validé', 'Validé'), ('rejeté', 'Rejeté')])

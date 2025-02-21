@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Project, Dataset, Annotation
+from .models import Project, Dataset, Annotation, AnnotationHistory
 
 User = get_user_model()
 
@@ -46,10 +46,52 @@ class DatasetSerializer(serializers.ModelSerializer):
 class AnnotationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Annotation
-        fields = ['id', 'dataitem', 'image', 'label', 'x_min', 'y_min', 'x_max', 'y_max', 
-                 'confidence', 'created_by', 'created_at', 'validated']
-        read_only_fields = ['created_at', 'created_by']
+        fields = [
+            'id', 'dataitem', 'image', 'label',
+            'x_min', 'y_min', 'x_max', 'y_max',
+            'confidence', 'created_by', 'created_at',
+            'last_modified_at', 'last_modified_by',
+            'is_ai_generated', 'validated', 'validation_status',
+            'validation_comment', 'validated_by', 'validated_at'
+        ]
+        read_only_fields = ['created_at', 'created_by', 'last_modified_at']
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # Sauvegarder qui a fait la modification
+        request = self.context.get('request')
+        if request and request.user:
+            validated_data['last_modified_by'] = request.user
+        
+        return super().update(instance, validated_data)
+
+    def validate(self, data):
+        # Valider que les coordonnées sont dans les bonnes plages
+        if 'x_min' in data and 'x_max' in data:
+            if data['x_min'] >= data['x_max']:
+                raise serializers.ValidationError("x_min doit être inférieur à x_max")
+            if data['x_min'] < 0 or data['x_max'] > 1:
+                raise serializers.ValidationError("Les coordonnées x doivent être entre 0 et 1")
+
+        if 'y_min' in data and 'y_max' in data:
+            if data['y_min'] >= data['y_max']:
+                raise serializers.ValidationError("y_min doit être inférieur à y_max")
+            if data['y_min'] < 0 or data['y_max'] > 1:
+                raise serializers.ValidationError("Les coordonnées y doivent être entre 0 et 1")
+
+        return data
+
+class AnnotationHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AnnotationHistory
+        fields = [
+            'id', 'annotation', 'previous_label',
+            'previous_x_min', 'previous_y_min',
+            'previous_x_max', 'previous_y_max',
+            'modified_by', 'modified_at',
+            'modification_type', 'comment'
+        ]
+        read_only_fields = ['modified_at', 'modified_by']

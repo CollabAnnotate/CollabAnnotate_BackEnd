@@ -1,6 +1,6 @@
 import os
-from rest_framework import generics, permissions, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework import generics, permissions, status, viewsets
+from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -10,13 +10,17 @@ from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from ultralytics import YOLO
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Project, Dataset, Annotation
+from .models import Project, Dataset, Annotation, AnnotationHistory
 from .serializers import (
     UserSerializer, 
     ProjectSerializer, 
     DatasetSerializer,
-    AnnotationSerializer
+    AnnotationSerializer,
+    AnnotationHistorySerializer
 )
+from rest_framework import viewsets
+from django.db.models import Q
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -144,6 +148,62 @@ def upload_and_detect(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def detect_objects(request):
+    try:
+        if 'image' not in request.FILES:
+            return Response({
+                'error': 'Aucune image fournie'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        image = request.FILES['image']
+        
+        # Sauvegarder temporairement l'image
+        temp_path = default_storage.save('temp_detections/' + image.name, ContentFile(image.read()))
+        full_path = default_storage.path(temp_path)
+
+        try:
+            # Faire la détection avec YOLO
+            results = model(full_path)
+            
+            # Convertir les résultats en format JSON
+            detections = []
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    # Convertir les coordonnées en format relatif
+                    x1, y1, x2, y2 = box.xyxyn[0].tolist()
+                    confidence = float(box.conf[0])
+                    class_id = int(box.cls[0])
+                    label = result.names[class_id]
+
+                    detections.append({
+                        'label': label,
+                        'confidence': confidence,
+                        'x_min': x1,
+                        'y_min': y1,
+                        'x_max': x2,
+                        'y_max': y2
+                    })
+
+            # Nettoyer le fichier temporaire
+            default_storage.delete(temp_path)
+
+            return Response({
+                'detections': detections
+            })
+
+        except Exception as e:
+            # Nettoyer en cas d'erreur
+            default_storage.delete(temp_path)
+            raise e
+
+    except Exception as e:
+        return Response({
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def save_annotations(request):
     try:
         annotations = request.data.get('annotations', [])
@@ -209,3 +269,50 @@ def validate_annotation(request, annotation_id):
         return Response({"error": "Annotation non trouvée"}, status=404)
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+class AnnotationViewSet(viewsets.ModelViewSet):
+    serializer_class = AnnotationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Annotation.objects.filter(
+            Q(created_by=self.request.user) | 
+            Q(dataitem__project__created_by=self.request.user)
+        )
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        
+        # Créer une entrée dans l'historique avant la mise à jour
+        AnnotationHistory.objects.create(
+            annotation=instance,
+            previous_label=instance.label,
+            previous_x_min=instance.x_min,
+            previous_y_min=instance.y_min,
+            previous_x_max=instance.x_max,
+            previous_y_max=instance.y_max,
+            modified_by=self.request.user,
+            modification_type=self.request.data.get('modification_type', 'manual')
+        )
+        
+        # Mettre à jour l'annotation
+        serializer.save(
+            last_modified_by=self.request.user,
+            last_modified_at=timezone.now()
+        )
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        annotation = self.get_object()
+        history = AnnotationHistory.objects.filter(annotation=annotation)
+        serializer = AnnotationHistorySerializer(history, many=True)
+        return Response(serializer.data)
+
+class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = AnnotationHistorySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return AnnotationHistory.objects.filter(
+            annotation__created_by=self.request.user
+        ).order_by('-modified_at')

@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 from pathlib import Path
+import os
 from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -38,20 +39,22 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'rest_framework',  # Django REST Framework
-    'rest_framework_simplejwt',  # JWT Auth
-    'api',  # Notre application API
-    'corsheaders',
+    'rest_framework',  
+    'rest_framework_simplejwt',  
+    'corsheaders',  
+    'api',  
 ]
+
 # Configuration Django REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',  # API sécurisée par défaut
+        'rest_framework.permissions.IsAuthenticated',  
     ),
 }
+
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
@@ -62,6 +65,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
 ]
@@ -100,6 +104,9 @@ DATABASES = {
         'PASSWORD': 'NouveauMotDePasse123',
         'HOST': 'localhost',
         'PORT': '5432',
+        'OPTIONS': {
+            'client_encoding': 'UTF8',
+        },
     }
 }
 
@@ -136,12 +143,23 @@ USE_TZ = True
 AUTH_USER_MODEL = 'api.User'
 
 
+# Configuration des fichiers média
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Assurez-vous que le dossier media existe
+if not os.path.exists(MEDIA_ROOT):
+    os.makedirs(MEDIA_ROOT)
+
+# Créer le dossier pour les détections temporaires
+TEMP_DETECTION_DIR = os.path.join(MEDIA_ROOT, 'temp_detections')
+if not os.path.exists(TEMP_DETECTION_DIR):
+    os.makedirs(TEMP_DETECTION_DIR)
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
