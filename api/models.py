@@ -1,6 +1,7 @@
 from django.contrib.auth.models import AbstractUser, Group, Permission
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 
 class User(AbstractUser):
     ROLE_CHOICES = [
@@ -14,14 +15,36 @@ class User(AbstractUser):
 
 class Project(models.Model):
     STATUS_CHOICES = [
-        ('en_cours', 'En cours'),
-        ('termine', 'Terminé'),
+        ('draft', 'Brouillon'),
+        ('published', 'Publié'),
+        ('archived', 'Archivé'),
+    ]
+    VISIBILITY_CHOICES = [
+        ('private', 'Privé'),
+        ('public', 'Public'),
     ]
     name = models.CharField(max_length=255)
     description = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='en_cours')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    visibility = models.CharField(max_length=20, choices=VISIBILITY_CHOICES, default='private')
+    published_at = models.DateTimeField(null=True, blank=True)
+    tags = models.CharField(max_length=500, blank=True)  # Stocké comme une chaîne JSON de tags
+    allow_community_annotations = models.BooleanField(default=True)
+    
+    def publish(self):
+        from django.utils import timezone
+        self.status = 'published'
+        self.visibility = 'public'
+        self.published_at = timezone.now()
+        self.save()
+
+    def unpublish(self):
+        self.status = 'draft'
+        self.visibility = 'private'
+        self.published_at = None
+        self.save()
 
 class Dataset(models.Model):
     name = models.CharField(max_length=255)
@@ -30,8 +53,11 @@ class Dataset(models.Model):
 
 class DataItem(models.Model):
     dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE)
-    file_path = models.CharField(max_length=500)
-    metadata = models.JSONField()
+    file_path = models.CharField(max_length=500, blank=True, null=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    image = models.ImageField(upload_to='dataset_images/', null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
 
 class Label(models.Model):
     dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
@@ -85,6 +111,30 @@ class AnnotationHistory(models.Model):
     def __str__(self):
         return f'Modification de {self.annotation} par {self.modified_by} le {self.modified_at}'
 
+class CommunityAnnotation(models.Model):
+    dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
+    parent_annotation = models.ForeignKey(Annotation, null=True, blank=True, on_delete=models.SET_NULL, related_name='community_responses')
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    content = models.TextField()
+    coordinates = models.JSONField(null=True, blank=True)  # Pour stocker les coordonnées de l'annotation visuelle
+    is_flagged = models.BooleanField(default=False)
+    flag_reason = models.TextField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+class ProjectVersion(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='versions')
+    version_number = models.IntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    changes = models.JSONField()  # Stocke les modifications apportées dans cette version
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    class Meta:
+        unique_together = ('project', 'version_number')
+        ordering = ['-version_number']
+
 class Validation(models.Model):
     annotation = models.ForeignKey(Annotation, on_delete=models.CASCADE)
     status = models.CharField(max_length=20, choices=[('validé', 'Validé'), ('rejeté', 'Rejeté')])
@@ -106,3 +156,21 @@ class DetectedObject(models.Model):
     x_max = models.FloatField()
     y_max = models.FloatField()
     created_at = models.DateTimeField(auto_now_add=True)
+
+class Notification(models.Model):
+    NOTIFICATION_TYPES = [
+        ('new_annotation', 'Nouvelle annotation'),
+        ('new_response', 'Nouvelle réponse'),
+        ('project_published', 'Projet publié'),
+        ('annotation_flagged', 'Annotation signalée'),
+    ]
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
+    content = models.TextField()
+    related_project = models.ForeignKey(Project, null=True, on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_read = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']

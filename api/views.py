@@ -10,17 +10,21 @@ from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from ultralytics import YOLO
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Project, Dataset, Annotation, AnnotationHistory
+from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem
 from .serializers import (
     UserSerializer, 
     ProjectSerializer, 
     DatasetSerializer,
     AnnotationSerializer,
-    AnnotationHistorySerializer
+    AnnotationHistorySerializer,
+    CommunityAnnotationSerializer,
+    NotificationSerializer,
+    DataItemSerializer
 )
 from rest_framework import viewsets
 from django.db.models import Q
 from django.utils import timezone
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 User = get_user_model()
 
@@ -42,8 +46,15 @@ class MyTokenObtainPairView(TokenObtainPairView):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
+    print("Données reçues:", request.data)  # Debug log
+    
+    # Assurez-vous que le rôle est en minuscules
+    if 'role' in request.data and isinstance(request.data['role'], str):
+        request.data['role'] = request.data['role'].lower()
+    
     serializer = UserSerializer(data=request.data)
     if not serializer.is_valid():
+        print("Erreurs de validation:", serializer.errors)  # Debug log
         return Response({
             "status": "error",
             "errors": serializer.errors
@@ -63,6 +74,7 @@ def register_user(request):
             "message": "Utilisateur créé avec succès"
         }, status=status.HTTP_201_CREATED)
     except Exception as e:
+        print("Erreur lors de la création:", str(e))  # Debug log
         return Response({
             "status": "error",
             "message": str(e)
@@ -108,6 +120,29 @@ class DatasetDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return Dataset.objects.filter(project__created_by=self.request.user)
+
+class DatasetViewSet(viewsets.ModelViewSet):
+    serializer_class = DatasetSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Dataset.objects.filter(
+            Q(project__visibility='public') | 
+            Q(project__created_by=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(project__created_by=self.request.user)
+
+class DataItemViewSet(viewsets.ModelViewSet):
+    serializer_class = DataItemSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return DataItem.objects.filter(
+            Q(dataset__project__visibility='public') | 
+            Q(dataset__project__created_by=self.request.user)
+        )
 
 MODEL_PATH = "yolov8n.pt"
 model = YOLO(MODEL_PATH)
@@ -277,7 +312,7 @@ class AnnotationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Annotation.objects.filter(
             Q(created_by=self.request.user) | 
-            Q(dataitem__project__created_by=self.request.user)
+            Q(dataitem__dataset__project__created_by=self.request.user)
         )
 
     def perform_update(self, serializer):
@@ -316,3 +351,218 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
         return AnnotationHistory.objects.filter(
             annotation__created_by=self.request.user
         ).order_by('-modified_at')
+
+class ProjectViewSet(viewsets.ModelViewSet):
+    serializer_class = ProjectSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+
+    def get_queryset(self):
+        user = self.request.user
+        return Project.objects.filter(
+            Q(created_by=user) | 
+            Q(status='published')
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=['POST'])
+    def add_images(self, request, pk=None):
+        project = self.get_object()
+        files = request.FILES.getlist('images')
+        
+        if not files:
+            return Response(
+                {'error': 'Aucune image fournie'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        dataset, created = Dataset.objects.get_or_create(
+            project=project,
+            defaults={'name': f'Dataset for {project.name}'}
+        )
+        
+        created_items = []
+        for file in files:
+            data_item = DataItem.objects.create(
+                dataset=dataset,
+                image=file,
+                created_by=request.user
+            )
+            created_items.append(data_item)
+        
+        serializer = DataItemSerializer(created_items, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['GET'])
+    def get_images(self, request, pk=None):
+        project = self.get_object()
+        dataset = project.dataset_set.first()
+        
+        if not dataset:
+            return Response([])
+            
+        data_items = dataset.dataitem_set.all()
+        serializer = DataItemSerializer(data_items, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['GET'])
+    def get_annotations(self, request, pk=None):
+        project = self.get_object()
+        annotations = Annotation.objects.filter(dataitem__dataset__project=project)
+        serializer = AnnotationSerializer(annotations, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['GET'])
+    def stats(self, request, pk=None):
+        project = self.get_object()
+        dataset = project.dataset_set.first()
+        
+        stats = {
+            'total_images': 0,
+            'total_annotations': 0,
+            'pending_annotations': 0,
+        }
+        
+        if dataset:
+            stats['total_images'] = dataset.dataitem_set.count()
+            stats['total_annotations'] = Annotation.objects.filter(
+                dataitem__dataset=dataset
+            ).count()
+            stats['pending_annotations'] = CommunityAnnotation.objects.filter(
+                dataitem__dataset=dataset,
+                is_flagged=False
+            ).count()
+        
+        return Response(stats)
+
+    @action(detail=True, methods=['POST'])
+    def publish(self, request, pk=None):
+        project = self.get_object()
+        if project.created_by != request.user:
+            return Response(
+                {'error': 'Non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        project.status = 'published'
+        project.save()
+        return Response({'status': 'published'})
+
+    @action(detail=True, methods=['POST'])
+    def unpublish(self, request, pk=None):
+        project = self.get_object()
+        if project.created_by != request.user:
+            return Response(
+                {'error': 'Non autorisé'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        project.status = 'draft'
+        project.save()
+        return Response({'status': 'draft'})
+
+    @action(detail=True, methods=['POST'])
+    def detect_objects(self, request, pk=None):
+        """
+        Détecte les objets dans une image spécifique
+        """
+        try:
+            project = self.get_object()
+            image_id = request.data.get('image_id')
+            if not image_id:
+                return Response({"error": "ID de l'image requis"}, status=400)
+                
+            data_item = DataItem.objects.get(id=image_id, dataset__project=project)
+            image_path = data_item.image.path
+            
+            # Utiliser YOLO pour détecter les objets
+            results = model(image_path)
+            detected_objects = []
+            
+            for result in results:
+                if hasattr(result, 'boxes'):
+                    for box in result.boxes:
+                        detected_objects.append({
+                            'label': model.names[int(box.cls[0])],
+                            'confidence': float(box.conf[0]),
+                            'x_min': float(box.xyxy[0][0]) / data_item.image.width,
+                            'y_min': float(box.xyxy[0][1]) / data_item.image.height,
+                            'x_max': float(box.xyxy[0][2]) / data_item.image.width,
+                            'y_max': float(box.xyxy[0][3]) / data_item.image.height
+                        })
+            
+            return Response(detected_objects)
+            
+        except DataItem.DoesNotExist:
+            return Response({"error": "Image non trouvée"}, status=404)
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)
+
+class CommunityAnnotationViewSet(viewsets.ModelViewSet):
+    serializer_class = CommunityAnnotationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return CommunityAnnotation.objects.filter(
+            dataitem__dataset__project__visibility='public'
+        )
+
+    def perform_create(self, serializer):
+        dataitem = serializer.validated_data['dataitem']
+        project = dataitem.dataset.project
+        
+        if not project.visibility == 'public':
+            raise permissions.PermissionDenied(
+                "Ce projet n'accepte pas les annotations communautaires"
+            )
+            
+        serializer.save(created_by=self.request.user)
+        
+        # Créer une notification pour le propriétaire du projet
+        Notification.objects.create(
+            user=project.created_by,
+            notification_type='new_annotation',
+            content=f"Nouvelle annotation communautaire sur votre projet {project.name}",
+            related_project=project
+        )
+
+    @action(detail=True, methods=['post'])
+    def flag(self, request, pk=None):
+        annotation = self.get_object()
+        reason = request.data.get('reason', '')
+        
+        annotation.is_flagged = True
+        annotation.flag_reason = reason
+        annotation.save()
+        
+        # Notifier le propriétaire du projet
+        project = annotation.dataitem.dataset.project
+        Notification.objects.create(
+            user=project.created_by,
+            notification_type='annotation_flagged',
+            content=f"Une annotation a été signalée dans votre projet {project.name}",
+            related_project=project
+        )
+        
+        return Response({"status": "flagged"})
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = NotificationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Notification.objects.filter(user=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def mark_as_read(self, request, pk=None):
+        notification = self.get_object()
+        notification.is_read = True
+        notification.save()
+        return Response({"status": "marked as read"})
+
+    @action(detail=False, methods=['post'])
+    def mark_all_as_read(self, request):
+        Notification.objects.filter(user=request.user).update(is_read=True)
+        return Response({"status": "all marked as read"})
