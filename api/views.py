@@ -8,6 +8,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from ultralytics import YOLO
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem
@@ -274,7 +275,7 @@ def get_annotations_for_review(request):
     if user.role not in ['verificateur', 'admin']:
         return Response({"error": "Permission refusée"}, status=403)
 
-    annotations = Annotation.objects.filter(validated=False)
+    annotations = Annotation.objects.filter(is_validated=False)
     serializer = AnnotationSerializer(annotations, many=True)
     return Response(serializer.data)
 
@@ -293,7 +294,7 @@ def validate_annotation(request, annotation_id):
         if status not in ['validé', 'rejeté']:
             return Response({"error": "Statut invalide"}, status=400)
 
-        annotation.validated = True
+        annotation.is_validated = True
         annotation.validation_status = status
         annotation.validation_comment = comment
         annotation.validated_by = user
@@ -314,6 +315,9 @@ class AnnotationViewSet(viewsets.ModelViewSet):
             Q(created_by=self.request.user) | 
             Q(dataitem__dataset__project__created_by=self.request.user)
         )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
 
     def perform_update(self, serializer):
         instance = self.get_object()
@@ -566,3 +570,44 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def mark_all_as_read(self, request):
         Notification.objects.filter(user=request.user).update(is_read=True)
         return Response({"status": "all marked as read"})
+
+class UserViewSet(viewsets.ModelViewSet):
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return get_user_model().objects.filter(id=self.request.user.id)
+    
+    @action(detail=False, methods=['get', 'patch'])
+    def me(self, request):
+        if request.method == 'GET':
+            serializer = self.get_serializer(request.user)
+            return Response(serializer.data)
+        elif request.method == 'PATCH':
+            serializer = self.get_serializer(request.user, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['post'], url_path='me/change-password')
+    def change_password(self, request):
+        user = request.user
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+        
+        if not current_password or not new_password:
+            return Response(
+                {'error': 'Les deux mots de passe sont requis'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not user.check_password(current_password):
+            return Response(
+                {'error': 'Mot de passe actuel incorrect'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        user.password = make_password(new_password)
+        user.save()
+        return Response({'message': 'Mot de passe modifié avec succès'})

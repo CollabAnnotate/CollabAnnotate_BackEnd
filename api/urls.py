@@ -9,10 +9,12 @@ from .views import (
     AnnotationHistoryViewSet,
     detect_objects,
     MyTokenObtainPairView,
-    register_user
+    register_user,
+    UserViewSet
 )
 
 router = DefaultRouter()
+router.register(r'users', UserViewSet, basename='user')
 router.register(r'projects', ProjectViewSet, basename='project')
 router.register(r'annotations', AnnotationViewSet, basename='annotation')
 router.register(r'annotation-history', AnnotationHistoryViewSet, basename='annotation-history')

@@ -10,6 +10,7 @@ class User(AbstractUser):
         ('admin', 'Administrateur'),
     ]
     role = models.CharField(max_length=15, choices=ROLE_CHOICES, default='annotateur')
+    bio = models.TextField(blank=True)
     groups = models.ManyToManyField(Group, related_name="api_user_groups", blank=True)
     user_permissions = models.ManyToManyField(Permission, related_name="api_user_permissions", blank=True)
 
@@ -77,7 +78,7 @@ class Annotation(models.Model):
     confidence = models.FloatField(default=1.0)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
-    validated = models.BooleanField(default=False)
+    is_validated = models.BooleanField(default=False)
     validation_status = models.CharField(max_length=20, choices=[("validé", "Validé"), ("rejeté", "Rejeté")], null=True, blank=True)
     validation_comment = models.TextField(null=True, blank=True)
     validated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="validated_annotations")

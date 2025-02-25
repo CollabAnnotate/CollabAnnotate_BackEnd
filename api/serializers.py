@@ -7,37 +7,10 @@ from django.conf import settings
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
-    password2 = serializers.CharField(write_only=True, required=True)
-    role = serializers.ChoiceField(choices=['annotateur', 'verificateur', 'admin'], default='annotateur')
-
     class Meta:
-        model = User
-        fields = ('id', 'username', 'email', 'password', 'password2', 'role')
-        extra_kwargs = {
-            'email': {'required': True},
-            'username': {'required': True}
-        }
-
-    def validate(self, attrs):
-        if attrs['password'] != attrs['password2']:
-            raise serializers.ValidationError({"password": "Les mots de passe ne correspondent pas"})
-        
-        # Validation du mot de passe
-        if len(attrs['password']) < 8:
-            raise serializers.ValidationError({"password": "Le mot de passe doit contenir au moins 8 caractères"})
-        
-        return attrs
-
-    def create(self, validated_data):
-        validated_data.pop('password2')
-        user = User.objects.create_user(
-            username=validated_data['username'],
-            email=validated_data['email'],
-            password=validated_data['password'],
-            role=validated_data.get('role', 'annotateur')
-        )
-        return user
+        model = get_user_model()
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 'bio']
+        read_only_fields = ['id']
 
 class ProjectSerializer(serializers.ModelSerializer):
     is_published = serializers.BooleanField(read_only=True)
@@ -85,10 +58,10 @@ class AnnotationSerializer(serializers.ModelSerializer):
         model = Annotation
         fields = [
             'id', 'dataitem', 'label', 'x_min', 'y_min', 'x_max', 'y_max',
-            'created_by', 'created_by_username', 'created_at', 'validated',
+            'created_by', 'created_by_username', 'created_at', 'is_validated',
             'validation_status', 'validation_comment'
         ]
-        read_only_fields = ['created_by', 'created_at', 'validated', 'validation_status']
+        read_only_fields = ['created_by', 'created_at', 'is_validated', 'validation_status']
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user

@@ -92,6 +92,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'backend.wsgi.application'
 
+# Configuration du modèle utilisateur personnalisé
+AUTH_USER_MODEL = 'api.User'
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
@@ -139,9 +141,6 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
-
-AUTH_USER_MODEL = 'api.User'
-
 
 # Configuration des fichiers média
 MEDIA_URL = '/media/'
