@@ -210,3 +210,64 @@ class Notification(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+class ProjectCollaborator(models.Model):
+    ROLE_CHOICES = [
+        ('viewer', 'Lecteur'),
+        ('annotator', 'Annotateur'),
+        ('editor', 'Éditeur'),
+        ('admin', 'Administrateur'),
+    ]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='collaborators')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='project_collaborations')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='viewer')
+    added_at = models.DateTimeField(auto_now_add=True)
+    added_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='added_collaborators')
+    last_accessed = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ('project', 'user')
+        ordering = ['added_at']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.role} sur {self.project.name}"
+
+class ProjectInvitation(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'En attente'),
+        ('accepted', 'Acceptée'),
+        ('rejected', 'Rejetée'),
+        ('expired', 'Expirée'),
+    ]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='invitations')
+    invited_email = models.EmailField()
+    role = models.CharField(max_length=20, choices=ProjectCollaborator.ROLE_CHOICES)
+    invited_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_invitations')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    token = models.CharField(max_length=100, unique=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Invitation pour {self.invited_email} - {self.project.name}"
+
+    def is_expired(self):
+        return timezone.now() > self.expires_at
+
+    def accept(self, user):
+        if self.status == 'pending' and not self.is_expired():
+            ProjectCollaborator.objects.create(
+                project=self.project,
+                user=user,
+                role=self.role,
+                added_by=self.invited_by
+            )
+            self.status = 'accepted'
+            self.save()
+            return True
+        return False

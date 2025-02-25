@@ -1,8 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import Project, Dataset, DataItem, Annotation, AnnotationHistory, CommunityAnnotation, ProjectVersion, Notification
+from .models import Project, Dataset, DataItem, Annotation, AnnotationHistory, CommunityAnnotation, ProjectVersion, Notification, ProjectCollaborator, ProjectInvitation
 from django.conf import settings
+from django.utils import timezone
 
 User = get_user_model()
 
@@ -172,3 +173,57 @@ class NotificationSerializer(serializers.ModelSerializer):
             'related_project', 'created_at', 'is_read'
         ]
         read_only_fields = ['user', 'created_at']
+
+class ProjectCollaboratorSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+    user_id = serializers.IntegerField(write_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+
+    class Meta:
+        model = ProjectCollaborator
+        fields = ['id', 'user', 'user_id', 'project', 'project_name', 'role', 'added_at', 'last_accessed']
+        read_only_fields = ['added_at', 'last_accessed']
+
+class ProjectInvitationSerializer(serializers.ModelSerializer):
+    invited_by_username = serializers.CharField(source='invited_by.username', read_only=True)
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    expires_in = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectInvitation
+        fields = ['id', 'project', 'project_name', 'invited_email', 'role', 'invited_by_username',
+                 'created_at', 'expires_at', 'status', 'expires_in']
+        read_only_fields = ['status', 'token', 'created_at', 'expires_at', 'invited_by']
+
+    def validate(self, data):
+        # Vérifier si l'email existe déjà comme collaborateur du projet
+        project = data.get('project')
+        invited_email = data.get('invited_email')
+        
+        if ProjectCollaborator.objects.filter(
+            project=project,
+            user__email=invited_email
+        ).exists():
+            raise serializers.ValidationError(
+                "Cet utilisateur est déjà collaborateur du projet"
+            )
+        
+        # Vérifier si une invitation en attente existe déjà
+        if ProjectInvitation.objects.filter(
+            project=project,
+            invited_email=invited_email,
+            status='pending'
+        ).exists():
+            raise serializers.ValidationError(
+                "Une invitation est déjà en attente pour cet email"
+            )
+        
+        return data
+
+    def get_expires_in(self, obj):
+        if obj.expires_at and obj.status == 'pending':
+            now = timezone.now()
+            if now < obj.expires_at:
+                time_left = obj.expires_at - now
+                return int(time_left.total_seconds())
+        return 0

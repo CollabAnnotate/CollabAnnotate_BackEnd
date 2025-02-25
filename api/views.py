@@ -1,5 +1,5 @@
 import os
-from rest_framework import generics, permissions, status, viewsets
+from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from ultralytics import YOLO
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem
+from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
     UserSerializer, 
     ProjectSerializer, 
@@ -20,12 +20,16 @@ from .serializers import (
     AnnotationHistorySerializer,
     CommunityAnnotationSerializer,
     NotificationSerializer,
-    DataItemSerializer
+    DataItemSerializer,
+    ProjectCollaboratorSerializer,
+    ProjectInvitationSerializer
 )
 from rest_framework import viewsets
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.exceptions import PermissionDenied
+from django.db import models
 
 User = get_user_model()
 
@@ -458,24 +462,20 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['GET'])
     def stats(self, request, pk=None):
         project = self.get_object()
-        dataset = project.dataset_set.first()
-        
+        datasets = Dataset.objects.filter(project=project)
+        dataitems = DataItem.objects.filter(dataset__in=datasets)
+        annotations = Annotation.objects.filter(dataitem__in=dataitems)
+        collaborators = ProjectCollaborator.objects.filter(project=project)
+
         stats = {
-            'total_images': 0,
-            'total_annotations': 0,
-            'pending_annotations': 0,
+            'total_images': dataitems.count(),
+            'total_annotations': annotations.count(),
+            'pending_annotations': annotations.filter(is_validated=False).count(),
+            'total_collaborators': collaborators.count() + 1,  # +1 pour inclure le créateur
+            'validated_annotations': annotations.filter(is_validated=True).count(),
+            'rejected_annotations': annotations.filter(validation_status='rejeté').count(),
         }
-        
-        if dataset:
-            stats['total_images'] = dataset.dataitem_set.count()
-            stats['total_annotations'] = Annotation.objects.filter(
-                dataitem__dataset=dataset
-            ).count()
-            stats['pending_annotations'] = CommunityAnnotation.objects.filter(
-                dataitem__dataset=dataset,
-                is_flagged=False
-            ).count()
-        
+
         return Response(stats)
 
     @action(detail=True, methods=['POST'])
@@ -556,7 +556,7 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         project = dataitem.dataset.project
         
         if not project.visibility == 'public':
-            raise permissions.PermissionDenied(
+            raise PermissionDenied(
                 "Ce projet n'accepte pas les annotations communautaires"
             )
             
@@ -651,3 +651,127 @@ class UserViewSet(viewsets.ModelViewSet):
         user.password = make_password(new_password)
         user.save()
         return Response({'message': 'Mot de passe modifié avec succès'})
+
+class ProjectCollaboratorViewSet(viewsets.ModelViewSet):
+    serializer_class = ProjectCollaboratorSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return ProjectCollaborator.objects.filter(
+            models.Q(project__created_by=self.request.user) |
+            models.Q(user=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        if project.created_by != self.request.user:
+            raise PermissionDenied("Seul le créateur du projet peut ajouter des collaborateurs")
+        serializer.save(added_by=self.request.user)
+
+    @action(detail=False, methods=['get'])
+    def my_collaborations(self, request):
+        collaborations = ProjectCollaborator.objects.filter(user=request.user)
+        serializer = self.get_serializer(collaborations, many=True)
+        return Response(serializer.data)
+
+class ProjectInvitationViewSet(viewsets.ModelViewSet):
+    serializer_class = ProjectInvitationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        return ProjectInvitation.objects.filter(
+            models.Q(project__created_by=self.request.user) |
+            models.Q(invited_email=self.request.user.email)
+        )
+
+    def create(self, request, *args, **kwargs):
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            
+            project = serializer.validated_data['project']
+            invited_email = serializer.validated_data['invited_email']
+            
+            # Vérifier si l'utilisateur est le créateur du projet ou un admin
+            is_creator = project.created_by == request.user
+            is_admin = ProjectCollaborator.objects.filter(
+                project=project,
+                user=request.user,
+                role='admin'
+            ).exists()
+            
+            if not (is_creator or is_admin):
+                raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
+            
+            # Générer un token unique
+            import secrets
+            token = secrets.token_urlsafe(32)
+            
+            # Définir une date d'expiration (7 jours)
+            from django.utils import timezone
+            import datetime
+            expires_at = timezone.now() + datetime.timedelta(days=7)
+            
+            invitation = serializer.save(
+                invited_by=request.user,
+                token=token,
+                expires_at=expires_at,
+                status='pending'
+            )
+            
+            # Créer une notification pour l'utilisateur invité s'il existe
+            User = get_user_model()
+            try:
+                invited_user = User.objects.get(email=invitation.invited_email)
+                Notification.objects.create(
+                    user=invited_user,
+                    type='project_invitation',
+                    message=f"Vous avez été invité à collaborer sur le projet {project.name}",
+                    related_project=project
+                )
+            except User.DoesNotExist:
+                pass
+                
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            
+        except serializers.ValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        invitation = self.get_object()
+        
+        if invitation.invited_email != request.user.email:
+            raise PermissionDenied("Cette invitation ne vous est pas destinée")
+        
+        if invitation.status != 'pending':
+            raise serializers.ValidationError("Cette invitation n'est plus valide")
+            
+        if invitation.is_expired():
+            raise serializers.ValidationError("Cette invitation a expiré")
+            
+        try:
+            invitation.accept(request.user)
+            return Response({"message": "Invitation acceptée avec succès"})
+        except Exception as e:
+            return Response(
+                {"message": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        invitation = self.get_object()
+        
+        if invitation.invited_email != request.user.email:
+            raise PermissionDenied("Cette invitation ne vous est pas destinée")
+            
+        if invitation.status != 'pending':
+            raise serializers.ValidationError("Cette invitation n'est plus valide")
+            
+        invitation.status = 'rejected'
+        invitation.save()
+        
+        return Response({"message": "Invitation rejetée"})

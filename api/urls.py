@@ -16,7 +16,9 @@ from .views import (
     upload_and_detect,
     save_annotations,
     get_annotations_for_review,
-    validate_annotation
+    validate_annotation,
+    ProjectCollaboratorViewSet,
+    ProjectInvitationViewSet
 )
 
 router = DefaultRouter()
@@ -28,6 +30,8 @@ router.register(r'annotations', AnnotationViewSet, basename='annotation')
 router.register(r'annotation-history', AnnotationHistoryViewSet, basename='annotation-history')
 router.register(r'community-annotations', CommunityAnnotationViewSet, basename='community-annotation')
 router.register(r'notifications', NotificationViewSet, basename='notification')
+router.register(r'project-collaborators', ProjectCollaboratorViewSet, basename='project-collaborator')
+router.register(r'project-invitations', ProjectInvitationViewSet, basename='project-invitation')
 
 urlpatterns = [
     # Routes d'authentification
