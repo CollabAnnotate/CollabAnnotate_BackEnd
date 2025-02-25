@@ -7,10 +7,39 @@ from django.conf import settings
 User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, required=True)
+    password2 = serializers.CharField(write_only=True, required=True)
+
     class Meta:
-        model = get_user_model()
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role', 'bio']
+        model = User
+        fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio']
         read_only_fields = ['id']
+        extra_kwargs = {
+            'first_name': {'required': False},
+            'last_name': {'required': False},
+            'bio': {'required': False},
+            'role': {'required': False}
+        }
+
+    def validate(self, attrs):
+        if attrs.get('password') != attrs.get('password2'):
+            raise serializers.ValidationError({"password": "Les mots de passe ne correspondent pas"})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop('password2')
+        password = validated_data.pop('password')
+        user = User.objects.create(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        if 'password' in validated_data:
+            password = validated_data.pop('password')
+            validated_data.pop('password2', None)
+            instance.set_password(password)
+        return super().update(instance, validated_data)
 
 class ProjectSerializer(serializers.ModelSerializer):
     is_published = serializers.BooleanField(read_only=True)

@@ -32,6 +32,9 @@ User = get_user_model()
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
+        refresh = self.get_token(self.user)
+        data['access'] = str(refresh.access_token)
+        data['refresh'] = str(refresh)
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
@@ -47,40 +50,45 @@ class MyTokenObtainPairView(TokenObtainPairView):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
-    print("Données reçues:", request.data)  # Debug log
-    
-    # Assurez-vous que le rôle est en minuscules
-    if 'role' in request.data and isinstance(request.data['role'], str):
-        request.data['role'] = request.data['role'].lower()
-    
-    serializer = UserSerializer(data=request.data)
-    if not serializer.is_valid():
-        print("Erreurs de validation:", serializer.errors)  # Debug log
-        return Response({
-            "status": "error",
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
     try:
+        # Assurez-vous que le rôle est en minuscules
+        if 'role' in request.data and isinstance(request.data['role'], str):
+            request.data['role'] = request.data['role'].lower()
+        
+        serializer = UserSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "status": "error",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         user = serializer.save()
+        
         # Générer un token JWT pour l'utilisateur
         refresh = RefreshToken.for_user(user)
+        
         return Response({
             "status": "success",
-            "user": UserSerializer(user).data,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role
+            },
             "token": {
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
             },
             "message": "Utilisateur créé avec succès"
         }, status=status.HTTP_201_CREATED)
+        
     except Exception as e:
-        print("Erreur lors de la création:", str(e))  # Debug log
         return Response({
             "status": "error",
             "message": str(e)
         }, status=status.HTTP_400_BAD_REQUEST)
-    
+
+
 class UserListCreateView(generics.ListCreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
