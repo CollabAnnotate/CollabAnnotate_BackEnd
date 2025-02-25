@@ -10,12 +10,20 @@ from .views import (
     detect_objects,
     MyTokenObtainPairView,
     register_user,
-    UserViewSet
+    UserViewSet,
+    DatasetViewSet,
+    DataItemViewSet,
+    upload_and_detect,
+    save_annotations,
+    get_annotations_for_review,
+    validate_annotation
 )
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
 router.register(r'projects', ProjectViewSet, basename='project')
+router.register(r'datasets', DatasetViewSet, basename='dataset')
+router.register(r'dataitems', DataItemViewSet, basename='dataitem')
 router.register(r'annotations', AnnotationViewSet, basename='annotation')
 router.register(r'annotation-history', AnnotationHistoryViewSet, basename='annotation-history')
 router.register(r'community-annotations', CommunityAnnotationViewSet, basename='community-annotation')
@@ -23,12 +31,17 @@ router.register(r'notifications', NotificationViewSet, basename='notification')
 
 urlpatterns = [
     # Routes d'authentification
+    path('register/', register_user, name='register'),
     path('token/', MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
-    path('register/', register_user, name='register'),
     
     # Routes API
     path('', include(router.urls)),
     path('detect/', detect_objects, name='detect-objects'),
+    path('upload-and-detect/', upload_and_detect, name='upload_and_detect'),
+    path('detect-objects/', detect_objects, name='detect_objects'),
+    path('save-annotations/', save_annotations, name='save_annotations'),
+    path('annotations/review/', get_annotations_for_review, name='get_annotations_for_review'),
+    path('annotations/<int:annotation_id>/validate/', validate_annotation, name='validate_annotation'),
 ]

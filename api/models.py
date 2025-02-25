@@ -83,6 +83,41 @@ class Annotation(models.Model):
     validation_comment = models.TextField(null=True, blank=True)
     validated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="validated_annotations")
     validated_at = models.DateTimeField(null=True, blank=True)
+    last_modified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="last_modified_annotations")
+    last_modified_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Annotation {self.id} - {self.label}"
+
+    def save(self, *args, **kwargs):
+        if not self.pk:  # Si c'est une nouvelle annotation
+            super().save(*args, **kwargs)
+            # Créer une entrée dans l'historique pour la création
+            AnnotationHistory.objects.create(
+                annotation=self,
+                modified_by=self.created_by,
+                modification_type='create'
+            )
+        else:  # Si c'est une mise à jour
+            # Récupérer l'ancienne version
+            old_instance = Annotation.objects.get(pk=self.pk)
+            super().save(*args, **kwargs)
+            # Créer une entrée dans l'historique pour la modification
+            if (old_instance.label != self.label or 
+                old_instance.x_min != self.x_min or 
+                old_instance.y_min != self.y_min or 
+                old_instance.x_max != self.x_max or 
+                old_instance.y_max != self.y_max):
+                AnnotationHistory.objects.create(
+                    annotation=self,
+                    modified_by=self.last_modified_by,
+                    modification_type='update',
+                    previous_label=old_instance.label,
+                    previous_x_min=old_instance.x_min,
+                    previous_y_min=old_instance.y_min,
+                    previous_x_max=old_instance.x_max,
+                    previous_y_max=old_instance.y_max
+                )
 
 class AnnotationHistory(models.Model):
     MODIFICATION_TYPES = [

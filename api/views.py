@@ -125,6 +125,7 @@ class DatasetDetailView(generics.RetrieveUpdateDestroyAPIView):
 class DatasetViewSet(viewsets.ModelViewSet):
     serializer_class = DatasetSerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = Dataset.objects.all()
 
     def get_queryset(self):
         return Dataset.objects.filter(
@@ -138,6 +139,7 @@ class DatasetViewSet(viewsets.ModelViewSet):
 class DataItemViewSet(viewsets.ModelViewSet):
     serializer_class = DataItemSerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = DataItem.objects.all()
 
     def get_queryset(self):
         return DataItem.objects.filter(
@@ -309,12 +311,19 @@ def validate_annotation(request, annotation_id):
 class AnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = AnnotationSerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = Annotation.objects.all()
 
     def get_queryset(self):
-        return Annotation.objects.filter(
+        dataitem_id = self.request.query_params.get('dataitem', None)
+        queryset = Annotation.objects.filter(
             Q(created_by=self.request.user) | 
             Q(dataitem__dataset__project__created_by=self.request.user)
         )
+        
+        if dataitem_id:
+            queryset = queryset.filter(dataitem_id=dataitem_id)
+            
+        return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -335,7 +344,7 @@ class AnnotationViewSet(viewsets.ModelViewSet):
         )
         
         # Mettre à jour l'annotation
-        serializer.save(
+        return serializer.save(
             last_modified_by=self.request.user,
             last_modified_at=timezone.now()
         )
@@ -347,19 +356,39 @@ class AnnotationViewSet(viewsets.ModelViewSet):
         serializer = AnnotationHistorySerializer(history, many=True)
         return Response(serializer.data)
 
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        annotation = self.get_object()
+        history = AnnotationHistory.objects.filter(annotation=annotation).latest('modified_at')
+        
+        annotation.label = history.previous_label
+        annotation.x_min = history.previous_x_min
+        annotation.y_min = history.previous_y_min
+        annotation.x_max = history.previous_x_max
+        annotation.y_max = history.previous_y_max
+        annotation.save()
+        
+        return Response({"message": "Annotation restaurée avec succès"})
+
 class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AnnotationHistorySerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = AnnotationHistory.objects.all()
 
     def get_queryset(self):
-        return AnnotationHistory.objects.filter(
-            annotation__created_by=self.request.user
-        ).order_by('-modified_at')
+        annotation_id = self.request.query_params.get('annotation', None)
+        queryset = super().get_queryset()
+        
+        if annotation_id:
+            queryset = queryset.filter(annotation_id=annotation_id)
+            
+        return queryset.order_by('-modified_at')
 
 class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = (MultiPartParser, FormParser, JSONParser)
+    queryset = Project.objects.all()
 
     def get_queryset(self):
         user = self.request.user
@@ -507,6 +536,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 class CommunityAnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = CommunityAnnotationSerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = CommunityAnnotation.objects.all()
 
     def get_queryset(self):
         return CommunityAnnotation.objects.filter(
@@ -552,9 +582,10 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         
         return Response({"status": "flagged"})
 
-class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+class NotificationViewSet(viewsets.ModelViewSet):
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
+    queryset = Notification.objects.all()
 
     def get_queryset(self):
         return Notification.objects.filter(user=self.request.user)
@@ -574,6 +605,7 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
+    queryset = User.objects.all()
     
     def get_queryset(self):
         return get_user_model().objects.filter(id=self.request.user.id)

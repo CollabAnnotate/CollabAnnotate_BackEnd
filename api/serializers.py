@@ -92,14 +92,25 @@ class AnnotationSerializer(serializers.ModelSerializer):
         return data
 
 class AnnotationHistorySerializer(serializers.ModelSerializer):
+    modified_by_username = serializers.CharField(source='modified_by.username', read_only=True)
+    modified_by_email = serializers.CharField(source='modified_by.email', read_only=True)
+    modified_at = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True)
+    
     class Meta:
         model = AnnotationHistory
         fields = [
-            'id', 'annotation', 'previous_label',
-            'previous_x_min', 'previous_y_min',
-            'previous_x_max', 'previous_y_max',
-            'modified_by', 'modified_at',
-            'modification_type', 'comment'
+            'id', 
+            'annotation', 
+            'previous_label', 
+            'previous_x_min', 
+            'previous_y_min', 
+            'previous_x_max', 
+            'previous_y_max',
+            'modified_by',
+            'modified_by_username',
+            'modified_by_email',
+            'modified_at',
+            'modification_type'
         ]
         read_only_fields = ['modified_at', 'modified_by']
 
