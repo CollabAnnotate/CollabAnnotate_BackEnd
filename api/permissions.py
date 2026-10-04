@@ -51,6 +51,61 @@ class ProjectPermission(BasePermission):
         return has_project_role(request.user, obj, EDITOR_ROLES)
 
 
+class DataItemPermission(BasePermission):
+    """Une image se modifie ou se supprime avec les droits d'éditeur de son projet."""
+    message = "Vous n'avez pas les droits nécessaires sur ce projet."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        return has_project_role(request.user, obj.dataset.project, EDITOR_ROLES)
+
+
+class AnnotationPermission(BasePermission):
+    """Une annotation se modifie par son auteur ou par un éditeur du projet."""
+    message = "Vous ne pouvez modifier que vos propres annotations."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        if obj.created_by_id == request.user.id:
+            return True
+        return has_project_role(request.user, obj.dataitem.dataset.project, EDITOR_ROLES)
+
+
+class CollaboratorPermission(BasePermission):
+    """
+    Gestion de l'équipe d'un projet : réservée au propriétaire et aux collaborateurs admin.
+    Personne ne peut modifier son propre rôle (pas d'auto-promotion), mais chacun peut
+    quitter un projet en supprimant sa propre ligne.
+    """
+    message = "Seuls le propriétaire et les administrateurs du projet gèrent l'équipe."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        if obj.user_id == request.user.id:
+            return view.action == 'destroy'
+        return has_project_role(request.user, obj.project, ('admin',))
+
+
+class CommunityAnnotationPermission(BasePermission):
+    """
+    Annotations communautaires : modifiables par leur auteur seulement ; supprimables
+    aussi par les éditeurs du projet (modération) ; tout le monde peut les signaler.
+    """
+    message = "Vous ne pouvez modifier que vos propres annotations."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS or view.action == 'flag':
+            return True
+        if obj.created_by_id == request.user.id:
+            return True
+        if view.action == 'destroy':
+            return has_project_role(request.user, obj.dataitem.dataset.project, EDITOR_ROLES)
+        return False
+
+
 class IsRoleAdmin(BasePermission):
     """Réservé aux utilisateurs dont le rôle applicatif est 'admin'."""
     message = 'Réservé aux administrateurs.'

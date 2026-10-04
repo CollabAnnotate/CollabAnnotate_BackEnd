@@ -5,7 +5,7 @@ from django.contrib.auth.password_validation import validate_password
 from .models import Project, Dataset, DataItem, Annotation, AnnotationHistory, CommunityAnnotation, ProjectVersion, Notification, ProjectCollaborator, ProjectInvitation
 from django.conf import settings
 from django.utils import timezone
-from .permissions import has_project_role, EDITOR_ROLES
+from .permissions import has_project_role, EDITOR_ROLES, ANNOTATOR_ROLES
 
 User = get_user_model()
 
@@ -125,6 +125,12 @@ class DataItemSerializer(serializers.ModelSerializer):
         fields = ['id', 'dataset', 'file_path', 'metadata', 'image_url', 'annotations_count', 'image']
         read_only_fields = ['metadata', 'image_url', 'annotations_count']
 
+    def validate_dataset(self, dataset):
+        """On n'ajoute d'images que dans un projet dont on est éditeur."""
+        if not has_project_role(self.context['request'].user, dataset.project, EDITOR_ROLES):
+            raise PermissionDenied("Vous n'avez pas les droits nécessaires sur ce projet.")
+        return dataset
+
     def get_image_url(self, obj):
         if obj.image:
             return self.context['request'].build_absolute_uri(obj.image.url)
@@ -148,6 +154,12 @@ class AnnotationSerializer(serializers.ModelSerializer):
             'created_by', 'created_at', 'is_validated', 'validation_status',
             'validation_comment', 'validated_by', 'validated_at'
         ]
+
+    def validate_dataitem(self, dataitem):
+        """On n'annote que les images d'un projet où l'on est au moins annotateur."""
+        if not has_project_role(self.context['request'].user, dataitem.dataset.project, ANNOTATOR_ROLES):
+            raise PermissionDenied("Vous n'êtes pas annotateur de ce projet.")
+        return dataitem
 
     def get_image_url(self, obj):
         """URL absolue de l'image annotée (portée par le DataItem)."""
@@ -187,7 +199,6 @@ class AnnotationSerializer(serializers.ModelSerializer):
 
 class AnnotationHistorySerializer(serializers.ModelSerializer):
     modified_by_username = serializers.CharField(source='modified_by.username', read_only=True)
-    modified_by_email = serializers.CharField(source='modified_by.email', read_only=True)
     modified_at = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True)
     
     class Meta:
@@ -202,7 +213,6 @@ class AnnotationHistorySerializer(serializers.ModelSerializer):
             'previous_y_max',
             'modified_by',
             'modified_by_username',
-            'modified_by_email',
             'modified_at',
             'modification_type'
         ]
@@ -250,6 +260,13 @@ class ProjectCollaboratorSerializer(serializers.ModelSerializer):
         model = ProjectCollaborator
         fields = ['id', 'user', 'user_id', 'project', 'project_name', 'role', 'added_at', 'last_accessed']
         read_only_fields = ['added_at', 'last_accessed']
+
+    def validate(self, attrs):
+        # Projet et utilisateur sont fixés à la création : seul le rôle évolue ensuite
+        if self.instance is not None:
+            attrs.pop('project', None)
+            attrs.pop('user_id', None)
+        return attrs
 
 class ProjectInvitationSerializer(serializers.ModelSerializer):
     invited_by_username = serializers.CharField(source='invited_by.username', read_only=True)

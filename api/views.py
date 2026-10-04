@@ -17,7 +17,17 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
-from .permissions import ProjectPermission, DatasetPermission, IsRoleAdmin, visible_projects_q
+from .permissions import (
+    AnnotationPermission,
+    CollaboratorPermission,
+    CommunityAnnotationPermission,
+    DataItemPermission,
+    DatasetPermission,
+    IsRoleAdmin,
+    ProjectPermission,
+    has_project_role,
+    visible_projects_q,
+)
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
     UserSerializer,
@@ -200,14 +210,14 @@ class DatasetViewSet(viewsets.ModelViewSet):
 
 class DataItemViewSet(viewsets.ModelViewSet):
     serializer_class = DataItemSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : DataItemSerializer.validate_dataset ; modification : DataItemPermission
+    permission_classes = [permissions.IsAuthenticated, DataItemPermission]
     queryset = DataItem.objects.all()
 
     def get_queryset(self):
         return DataItem.objects.filter(
-            Q(dataset__project__visibility='public') | 
-            Q(dataset__project__created_by=self.request.user)
-        )
+            visible_projects_q(self.request.user, prefix='dataset__project__')
+        ).distinct()
 
 MODEL_PATH = "yolov8n.pt"
 
@@ -311,32 +321,26 @@ def detect_objects(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def save_annotations(request):
-    try:
-        annotations = request.data.get('annotations', [])
-        image_id = request.data.get('image_id')
-        
-        saved_annotations = []
-        for ann in annotations:
-            serializer = AnnotationSerializer(data={
-                'dataitem': ann.get('dataitem_id'),  # Assure-toi que ce champ est fourni
-                'image': image_id,
-                'label': ann.get('label'),
-                'x_min': ann.get('x_min'),
-                'y_min': ann.get('y_min'),
-                'x_max': ann.get('x_max'),
-                'y_max': ann.get('y_max'),
-                'confidence': ann.get('confidence')
-            }, context={'request': request})
-            
-            if serializer.is_valid():
-                serializer.save()
-                saved_annotations.append(serializer.data)
-            else:
-                return Response(serializer.errors, status=400)
+    # Pas de try/except global : un refus de permission (validate_dataitem) doit
+    # rester un 403, pas devenir une 500.
+    saved_annotations = []
+    for ann in request.data.get('annotations', []):
+        serializer = AnnotationSerializer(data={
+            'dataitem': ann.get('dataitem_id'),
+            'label': ann.get('label'),
+            'x_min': ann.get('x_min'),
+            'y_min': ann.get('y_min'),
+            'x_max': ann.get('x_max'),
+            'y_max': ann.get('y_max'),
+            'confidence': ann.get('confidence')
+        }, context={'request': request})
 
-        return Response(saved_annotations, status=201)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        saved_annotations.append(serializer.data)
+
+    return Response(saved_annotations, status=status.HTTP_201_CREATED)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -381,41 +385,28 @@ def validate_annotation(request, annotation_id):
 
 class AnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = AnnotationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : AnnotationSerializer.validate_dataitem ; modification : AnnotationPermission
+    permission_classes = [permissions.IsAuthenticated, AnnotationPermission]
     queryset = Annotation.objects.all()
 
     def get_queryset(self):
+        """Annotations des projets visibles, y compris ceux où l'on collabore."""
         dataitem_id = self.request.query_params.get('dataitem', None)
         queryset = Annotation.objects.filter(
-            Q(created_by=self.request.user) | 
-            Q(dataitem__dataset__project__created_by=self.request.user)
-        )
-        
+            visible_projects_q(self.request.user, prefix='dataitem__dataset__project__')
+        ).distinct()
+
         if dataitem_id:
             queryset = queryset.filter(dataitem_id=dataitem_id)
-            
+
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
     def perform_update(self, serializer):
-        instance = self.get_object()
-        
-        # Créer une entrée dans l'historique avant la mise à jour
-        AnnotationHistory.objects.create(
-            annotation=instance,
-            previous_label=instance.label,
-            previous_x_min=instance.x_min,
-            previous_y_min=instance.y_min,
-            previous_x_max=instance.x_max,
-            previous_y_max=instance.y_max,
-            modified_by=self.request.user,
-            modification_type=self.request.data.get('modification_type', 'manual')
-        )
-        
-        # Mettre à jour l'annotation
-        return serializer.save(
+        # L'historique est écrit par Annotation.save() : ne pas le dupliquer ici
+        serializer.save(
             last_modified_by=self.request.user,
             last_modified_at=timezone.now()
         )
@@ -430,8 +421,17 @@ class AnnotationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def restore(self, request, pk=None):
         annotation = self.get_object()
-        history = AnnotationHistory.objects.filter(annotation=annotation).latest('modified_at')
-        
+        # Seules les modifications conservent un état précédent (l'entrée « create » est vide)
+        history = (
+            AnnotationHistory.objects.filter(annotation=annotation, modification_type='update')
+            .order_by('-modified_at')
+            .first()
+        )
+        if history is None:
+            return Response({"error": "Aucune version précédente à restaurer"},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        annotation.last_modified_by = request.user
         annotation.label = history.previous_label
         annotation.x_min = history.previous_x_min
         annotation.y_min = history.previous_y_min
@@ -448,8 +448,11 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         annotation_id = self.request.query_params.get('annotation', None)
-        queryset = super().get_queryset()
-        
+        # Uniquement l'historique des projets visibles (auparavant : tout l'historique)
+        queryset = super().get_queryset().filter(
+            visible_projects_q(self.request.user, prefix='annotation__dataitem__dataset__project__')
+        ).distinct()
+
         if annotation_id:
             queryset = queryset.filter(annotation_id=annotation_id)
             
@@ -632,7 +635,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 class CommunityAnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = CommunityAnnotationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, CommunityAnnotationPermission]
     queryset = CommunityAnnotation.objects.all()
 
     def get_queryset(self):
@@ -644,7 +647,7 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         dataitem = serializer.validated_data['dataitem']
         project = dataitem.dataset.project
         
-        if not project.visibility == 'public':
+        if project.visibility != 'public' or not project.allow_community_annotations:
             raise PermissionDenied(
                 "Ce projet n'accepte pas les annotations communautaires"
             )
@@ -772,18 +775,24 @@ class AdminUserViewSet(viewsets.ModelViewSet):
 
 class ProjectCollaboratorViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectCollaboratorSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, CollaboratorPermission]
 
     def get_queryset(self):
-        return ProjectCollaborator.objects.filter(
-            models.Q(project__created_by=self.request.user) |
-            models.Q(user=self.request.user)
-        )
+        """L'équipe des projets dont on est propriétaire ou membre, filtrable par ?project=."""
+        user = self.request.user
+        queryset = ProjectCollaborator.objects.filter(
+            Q(project__created_by=user) | Q(project__collaborators__user=user)
+        ).select_related('user', 'project').distinct()
+
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        return queryset
 
     def perform_create(self, serializer):
         project = serializer.validated_data['project']
-        if project.created_by != self.request.user:
-            raise PermissionDenied("Seul le créateur du projet peut ajouter des collaborateurs")
+        if not has_project_role(self.request.user, project, ('admin',)):
+            raise PermissionDenied("Seuls le propriétaire et les administrateurs du projet ajoutent des collaborateurs")
         serializer.save(added_by=self.request.user)
 
     @action(detail=False, methods=['get'])
