@@ -4,8 +4,11 @@ from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
@@ -33,12 +36,20 @@ from django.db import models
 
 User = get_user_model()
 
+def set_refresh_cookie(response, refresh_token):
+    """Place le refresh token dans un cookie HttpOnly (voir JWT_REFRESH_COOKIE)."""
+    response.set_cookie(value=refresh_token, **settings.JWT_REFRESH_COOKIE)
+
+
+def delete_refresh_cookie(response):
+    cookie = settings.JWT_REFRESH_COOKIE
+    response.delete_cookie(cookie['key'], path=cookie['path'], samesite=cookie['samesite'])
+
+
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
+        # Le parent fournit déjà 'access' et 'refresh'
         data = super().validate(attrs)
-        refresh = self.get_token(self.user)
-        data['access'] = str(refresh.access_token)
-        data['refresh'] = str(refresh)
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
@@ -48,7 +59,52 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 class MyTokenObtainPairView(TokenObtainPairView):
+    """Connexion : l'access token est renvoyé en JSON, le refresh token en cookie HttpOnly."""
     serializer_class = MyTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        set_refresh_cookie(response, response.data.pop('refresh'))
+        return response
+
+
+class CookieTokenRefreshView(TokenRefreshView):
+    """Refresh : lit le refresh token dans le cookie et le fait tourner (rotation + blacklist)."""
+
+    def post(self, request, *args, **kwargs):
+        refresh = request.COOKIES.get(settings.JWT_REFRESH_COOKIE['key'])
+        if not refresh:
+            raise InvalidToken('Aucun refresh token')
+
+        serializer = self.get_serializer(data={'refresh': refresh})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            raise InvalidToken(e.args[0]) from e
+
+        data = dict(serializer.validated_data)
+        new_refresh = data.pop('refresh', None)
+        response = Response(data, status=status.HTTP_200_OK)
+        if new_refresh:
+            set_refresh_cookie(response, new_refresh)
+        return response
+
+
+class LogoutView(APIView):
+    """Déconnexion : blackliste le refresh token du cookie puis supprime le cookie."""
+    authentication_classes = ()
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        refresh = request.COOKIES.get(settings.JWT_REFRESH_COOKIE['key'])
+        if refresh:
+            try:
+                RefreshToken(refresh).blacklist()
+            except TokenError:
+                pass  # déjà expiré ou blacklisté : rien à révoquer
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        delete_refresh_cookie(response)
+        return response
 
 
 @api_view(['POST'])
@@ -67,10 +123,8 @@ def register_user(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         user = serializer.save()
-        
-        # Générer un token JWT pour l'utilisateur
-        refresh = RefreshToken.for_user(user)
-        
+
+        # Pas de tokens ici : l'utilisateur se connecte ensuite via token/
         return Response({
             "status": "success",
             "user": {
@@ -78,10 +132,6 @@ def register_user(request):
                 "username": user.username,
                 "email": user.email,
                 "role": user.role
-            },
-            "token": {
-                "refresh": str(refresh),
-                "access": str(refresh.access_token),
             },
             "message": "Utilisateur créé avec succès"
         }, status=status.HTTP_201_CREATED)

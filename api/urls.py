@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenVerifyView
 from .views import (
     ProjectViewSet,
     AnnotationViewSet,
@@ -9,6 +9,8 @@ from .views import (
     AnnotationHistoryViewSet,
     detect_objects,
     MyTokenObtainPairView,
+    CookieTokenRefreshView,
+    LogoutView,
     register_user,
     UserViewSet,
     DatasetViewSet,
@@ -37,7 +39,8 @@ urlpatterns = [
     # Routes d'authentification
     path('register/', register_user, name='register'),
     path('token/', MyTokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
+    path('token/logout/', LogoutView.as_view(), name='token_logout'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
     
     # Routes API

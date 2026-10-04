@@ -185,7 +185,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Configuration de Simple JWT
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
@@ -198,4 +198,15 @@ SIMPLE_JWT = {
     'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
     'USER_ID_FIELD': 'id',
     'USER_ID_CLAIM': 'user_id',
+}
+
+# Refresh token transmis uniquement par cookie HttpOnly (illisible en JavaScript).
+# SameSite=Strict : jamais envoyé depuis un autre site (protection CSRF).
+JWT_REFRESH_COOKIE = {
+    'key': 'refresh_token',
+    'httponly': True,
+    'secure': env.bool('JWT_COOKIE_SECURE', default=not DEBUG),
+    'samesite': 'Strict',
+    'path': '/api/token/',  # envoyé seulement aux routes token/*
+    'max_age': int(SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
 }

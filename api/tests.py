@@ -20,6 +20,7 @@ class AuthTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(User.objects.count(), 1)
         self.assertEqual(User.objects.get().username, 'testuser')
+        self.assertNotIn('token', response.data)
 
     def test_login_user(self):
         User.objects.create_user(username='testuser', password='testpassword123', role='annotateur')
@@ -31,6 +32,58 @@ class AuthTests(APITestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('access', response.data)
+
+class RefreshCookieTests(APITestCase):
+    """Le refresh token ne circule que dans un cookie HttpOnly."""
+
+    def setUp(self):
+        User.objects.create_user(username='testuser', password='testpassword123', role='annotateur')
+
+    def login(self):
+        return self.client.post(
+            reverse('token_obtain_pair'),
+            {'username': 'testuser', 'password': 'testpassword123'},
+            format='json',
+        )
+
+    def test_login_pose_un_cookie_httponly(self):
+        response = self.login()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertNotIn('refresh', response.data)
+        cookie = response.cookies['refresh_token']
+        self.assertTrue(cookie['httponly'])
+        self.assertEqual(cookie['samesite'], 'Strict')
+        self.assertEqual(cookie['path'], '/api/token/')
+
+    def test_refresh_avec_cookie_fait_tourner_le_token(self):
+        old_token = self.login().cookies['refresh_token'].value
+        response = self.client.post(reverse('token_refresh'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertNotIn('refresh', response.data)
+        self.assertNotEqual(response.cookies['refresh_token'].value, old_token)
+
+    def test_refresh_sans_cookie_renvoie_401(self):
+        response = self.client.post(reverse('token_refresh'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_ancien_refresh_token_est_blackliste(self):
+        old_token = self.login().cookies['refresh_token'].value
+        self.client.post(reverse('token_refresh'))
+        self.client.cookies['refresh_token'] = old_token
+        response = self.client.post(reverse('token_refresh'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logout_revoque_le_refresh_token(self):
+        token = self.login().cookies['refresh_token'].value
+        response = self.client.post(reverse('token_logout'))
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(response.cookies['refresh_token'].value, '')
+        # Même un token copié avant la déconnexion n'est plus utilisable
+        self.client.cookies['refresh_token'] = token
+        response = self.client.post(reverse('token_refresh'))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
 class ProjectTests(APITestCase):
     def setUp(self):
