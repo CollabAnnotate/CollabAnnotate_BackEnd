@@ -1,0 +1,16 @@
+# Environnement Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Configuration locale (secrets)
+.env
+
+# Données locales
+db.sqlite3
+media/
+
+# IDE
+.vscode/
+.idea/
