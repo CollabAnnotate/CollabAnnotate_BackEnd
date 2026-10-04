@@ -15,7 +15,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio']
+        fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio', 'profile_picture']
         # Le rôle donne des droits (validation, accès admin) : jamais modifiable par
         # l'utilisateur lui-même. Il s'attribue via l'interface /admin/ de Django.
         read_only_fields = ['id', 'role']
@@ -42,6 +42,34 @@ class UserSerializer(serializers.ModelSerializer):
         if 'password' in validated_data:
             password = validated_data.pop('password')
             validated_data.pop('password2', None)
+            instance.set_password(password)
+        return super().update(instance, validated_data)
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Back-office des administrateurs : contrairement à UserSerializer, le rôle est modifiable."""
+    password = serializers.CharField(write_only=True, required=False, validators=[validate_password])
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'role',
+                  'is_active', 'password', 'date_joined', 'last_login']
+        read_only_fields = ['id', 'date_joined', 'last_login']
+
+    def validate(self, attrs):
+        if self.instance is None and not attrs.get('password'):
+            raise serializers.ValidationError({'password': 'Obligatoire à la création.'})
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop('password')
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop('password', None)
+        if password:
             instance.set_password(password)
         return super().update(instance, validated_data)
 

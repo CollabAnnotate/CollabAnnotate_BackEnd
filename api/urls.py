@@ -20,11 +20,13 @@ from .views import (
     get_annotations_for_review,
     validate_annotation,
     ProjectCollaboratorViewSet,
-    ProjectInvitationViewSet
+    ProjectInvitationViewSet,
+    AdminUserViewSet,
 )
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='user')
+router.register(r'admin/users', AdminUserViewSet, basename='admin-user')
 router.register(r'projects', ProjectViewSet, basename='project')
 router.register(r'datasets', DatasetViewSet, basename='dataset')
 router.register(r'dataitems', DataItemViewSet, basename='dataitem')

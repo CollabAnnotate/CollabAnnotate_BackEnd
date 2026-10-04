@@ -14,12 +14,14 @@ from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
-from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
-from .permissions import ProjectPermission, DatasetPermission, visible_projects_q
+from .permissions import ProjectPermission, DatasetPermission, IsRoleAdmin, visible_projects_q
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
-    UserSerializer, 
+    UserSerializer,
+    AdminUserSerializer,
     ProjectSerializer, 
     DatasetSerializer,
     AnnotationSerializer,
@@ -714,13 +716,41 @@ class UserViewSet(viewsets.ModelViewSet):
         
         if not user.check_password(current_password):
             return Response(
-                {'error': 'Mot de passe actuel incorrect'}, 
+                {'error': 'Mot de passe actuel incorrect'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        user.password = make_password(new_password)
+
+        # Mêmes règles de robustesse que partout ailleurs (AUTH_PASSWORD_VALIDATORS)
+        try:
+            validate_password(new_password, user)
+        except DjangoValidationError as e:
+            return Response({'error': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
         user.save()
         return Response({'message': 'Mot de passe modifié avec succès'})
+
+
+class AdminUserViewSet(viewsets.ModelViewSet):
+    """Gestion des comptes par les administrateurs (écran Utilisateurs)."""
+    serializer_class = AdminUserSerializer
+    permission_classes = [IsAuthenticated, IsRoleAdmin]
+    queryset = User.objects.all().order_by('username')
+
+    def perform_update(self, serializer):
+        # Garde-fou : un admin ne peut pas se retirer ses propres droits
+        if serializer.instance == self.request.user:
+            data = serializer.validated_data
+            if data.get('role', 'admin') != 'admin' or data.get('is_active') is False:
+                raise serializers.ValidationError(
+                    "Vous ne pouvez pas retirer vos propres droits d'administrateur."
+                )
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance == self.request.user:
+            raise serializers.ValidationError("Vous ne pouvez pas supprimer votre propre compte.")
+        instance.delete()
 
 class ProjectCollaboratorViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectCollaboratorSerializer

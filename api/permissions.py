@@ -51,6 +51,14 @@ class ProjectPermission(BasePermission):
         return has_project_role(request.user, obj, EDITOR_ROLES)
 
 
+class IsRoleAdmin(BasePermission):
+    """Réservé aux utilisateurs dont le rôle applicatif est 'admin'."""
+    message = 'Réservé aux administrateurs.'
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role == 'admin')
+
+
 class DatasetPermission(BasePermission):
     """Un dataset se lit comme son projet et se modifie avec les droits d'éditeur du projet."""
     message = "Vous n'avez pas les droits nécessaires sur ce projet."
