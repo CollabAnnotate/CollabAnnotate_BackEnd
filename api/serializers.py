@@ -14,12 +14,13 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio']
-        read_only_fields = ['id']
+        # Le rôle donne des droits (validation, accès admin) : jamais modifiable par
+        # l'utilisateur lui-même. Il s'attribue via l'interface /admin/ de Django.
+        read_only_fields = ['id', 'role']
         extra_kwargs = {
             'first_name': {'required': False},
             'last_name': {'required': False},
             'bio': {'required': False},
-            'role': {'required': False}
         }
 
     def validate(self, attrs):

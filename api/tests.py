@@ -2,7 +2,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
-from .models import User, Project, Dataset, DataItem, Annotation
+from .models import User, Project, Dataset, DataItem, Annotation, ProjectCollaborator
 from io import BytesIO
 from PIL import Image
 
@@ -84,6 +84,105 @@ class RefreshCookieTests(APITestCase):
         self.client.cookies['refresh_token'] = token
         response = self.client.post(reverse('token_refresh'))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+class RoleEscalationTests(APITestCase):
+    """Un utilisateur ne peut jamais s'attribuer un rôle lui-même."""
+
+    def test_inscription_en_admin_ignoree(self):
+        self.client.post(reverse('register'), {
+            'username': 'pirate', 'email': 'p@example.com',
+            'password': 'testpassword123', 'password2': 'testpassword123',
+            'role': 'admin',
+        }, format='json')
+        self.assertEqual(User.objects.get(username='pirate').role, 'annotateur')
+
+    def test_auto_promotion_via_users_me_ignoree(self):
+        user = User.objects.create_user(username='u', password='testpassword123', role='annotateur')
+        self.client.force_authenticate(user=user)
+        response = self.client.patch('/api/users/me/', {'role': 'admin'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertEqual(user.role, 'annotateur')
+
+    def test_auto_promotion_via_users_detail_ignoree(self):
+        user = User.objects.create_user(username='u', password='testpassword123', role='annotateur')
+        self.client.force_authenticate(user=user)
+        self.client.patch(reverse('user-detail', args=[user.id]), {'role': 'admin'}, format='json')
+        user.refresh_from_db()
+        self.assertEqual(user.role, 'annotateur')
+
+
+class ProjectPermissionTests(APITestCase):
+    """Voir un projet ne donne pas le droit de le modifier."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pw-test-123')
+        self.other = User.objects.create_user(username='other', password='pw-test-123')
+        self.published = Project.objects.create(
+            name='Publié', description='d', created_by=self.owner, status='published')
+        self.private = Project.objects.create(
+            name='Privé', description='d', created_by=self.owner)
+
+    def add_collaborator(self, project, user, role):
+        ProjectCollaborator.objects.create(project=project, user=user, role=role, added_by=self.owner)
+
+    def url(self, project, action=None):
+        if action:
+            return reverse(f'project-{action}', args=[project.id])
+        return reverse('project-detail', args=[project.id])
+
+    def test_autre_utilisateur_peut_lire_un_projet_publie(self):
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.get(self.url(self.published)).status_code, status.HTTP_200_OK)
+
+    def test_autre_utilisateur_ne_peut_pas_modifier_un_projet_publie(self):
+        self.client.force_authenticate(user=self.other)
+        response = self.client.patch(self.url(self.published), {'name': 'pirate'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.published.refresh_from_db()
+        self.assertEqual(self.published.name, 'Publié')
+
+    def test_autre_utilisateur_ne_peut_pas_supprimer_un_projet_publie(self):
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.delete(self.url(self.published)).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Project.objects.filter(id=self.published.id).exists())
+
+    def test_autre_utilisateur_ne_voit_pas_un_projet_prive(self):
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.get(self.url(self.private)).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_proprietaire_peut_modifier_et_publier(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.patch(self.url(self.private), {'name': 'Renommé'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        response = self.client.post(self.url(self.private, 'publish'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_collaborateur_editeur_voit_et_modifie_un_projet_prive(self):
+        self.add_collaborator(self.private, self.other, 'editor')
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.get(self.url(self.private)).status_code, status.HTTP_200_OK)
+        response = self.client.patch(self.url(self.private), {'name': 'Édité'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_collaborateur_editeur_ne_peut_ni_supprimer_ni_publier(self):
+        self.add_collaborator(self.private, self.other, 'editor')
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.delete(self.url(self.private)).status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post(self.url(self.private, 'publish')).status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_collaborateur_lecteur_ne_peut_pas_modifier(self):
+        self.add_collaborator(self.private, self.other, 'viewer')
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.client.get(self.url(self.private)).status_code, status.HTTP_200_OK)
+        response = self.client.patch(self.url(self.private), {'name': 'x'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_detection_refusee_a_un_non_collaborateur(self):
+        self.client.force_authenticate(user=self.other)
+        response = self.client.post(self.url(self.published, 'detect-objects'), {'image_id': 1}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
 
 class ProjectTests(APITestCase):
     def setUp(self):

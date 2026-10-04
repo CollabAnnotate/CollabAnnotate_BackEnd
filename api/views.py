@@ -14,6 +14,7 @@ from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from rest_framework_simplejwt.tokens import RefreshToken
+from .permissions import ProjectPermission
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
     UserSerializer, 
@@ -111,10 +112,7 @@ class LogoutView(APIView):
 @permission_classes([AllowAny])
 def register_user(request):
     try:
-        # Assurez-vous que le rôle est en minuscules
-        if 'role' in request.data and isinstance(request.data['role'], str):
-            request.data['role'] = request.data['role'].lower()
-        
+        # Le rôle envoyé est ignoré (read_only) : tout nouvel inscrit est annotateur
         serializer = UserSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -454,16 +452,19 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Être visible ne suffit pas pour modifier : voir api/permissions.py
+    permission_classes = [permissions.IsAuthenticated, ProjectPermission]
     parser_classes = (MultiPartParser, FormParser, JSONParser)
     queryset = Project.objects.all()
 
     def get_queryset(self):
+        """Projets visibles : les siens, ceux où l'on collabore, et les projets publiés."""
         user = self.request.user
         return Project.objects.filter(
-            Q(created_by=user) | 
+            Q(created_by=user) |
+            Q(collaborators__user=user) |
             Q(status='published')
-        )
+        ).distinct()
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -536,13 +537,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['POST'])
     def publish(self, request, pk=None):
+        # Réservé au propriétaire : contrôlé par ProjectPermission dans get_object()
         project = self.get_object()
-        if project.created_by != request.user:
-            return Response(
-                {'error': 'Non autorisé'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
         project.status = 'published'
         project.save()
         return Response({'status': 'published'})
@@ -550,12 +546,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['POST'])
     def unpublish(self, request, pk=None):
         project = self.get_object()
-        if project.created_by != request.user:
-            return Response(
-                {'error': 'Non autorisé'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
         project.status = 'draft'
         project.save()
         return Response({'status': 'draft'})
@@ -565,8 +555,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
         """
         Détecte les objets dans une image spécifique
         """
+        # Hors du try : un refus de permission doit donner 403, pas 500
+        project = self.get_object()
         try:
-            project = self.get_object()
             image_id = request.data.get('image_id')
             if not image_id:
                 return Response({"error": "ID de l'image requis"}, status=400)
