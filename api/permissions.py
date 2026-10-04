@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
 # Rôles de collaborateur (ProjectCollaborator.role) autorisés par type d'action
@@ -8,6 +9,19 @@ ANNOTATOR_ROLES = ('annotator', 'editor', 'admin')
 OWNER_ONLY_ACTIONS = ('destroy', 'publish', 'unpublish')
 # Actions ouvertes aux collaborateurs qui annotent
 ANNOTATOR_ACTIONS = ('detect_objects',)
+
+
+def visible_projects_q(user, prefix=''):
+    """
+    Filtre des projets visibles par l'utilisateur : les siens, ceux où il collabore,
+    et les projets publiés. `prefix` permet de l'appliquer depuis un modèle lié,
+    par exemple prefix='project__' pour filtrer des Dataset.
+    """
+    return (
+        Q(**{f'{prefix}created_by': user}) |
+        Q(**{f'{prefix}collaborators__user': user}) |
+        Q(**{f'{prefix}status': 'published'})
+    )
 
 
 def has_project_role(user, project, roles):
@@ -35,3 +49,13 @@ class ProjectPermission(BasePermission):
         if view.action in ANNOTATOR_ACTIONS:
             return has_project_role(request.user, obj, ANNOTATOR_ROLES)
         return has_project_role(request.user, obj, EDITOR_ROLES)
+
+
+class DatasetPermission(BasePermission):
+    """Un dataset se lit comme son projet et se modifie avec les droits d'éditeur du projet."""
+    message = "Vous n'avez pas les droits nécessaires sur ce projet."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS:
+            return True
+        return has_project_role(request.user, obj.project, EDITOR_ROLES)

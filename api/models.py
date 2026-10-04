@@ -199,6 +199,7 @@ class Notification(models.Model):
         ('new_response', 'Nouvelle réponse'),
         ('project_published', 'Projet publié'),
         ('annotation_flagged', 'Annotation signalée'),
+        ('project_invitation', 'Invitation à un projet'),
     ]
     
     user = models.ForeignKey(User, on_delete=models.CASCADE)

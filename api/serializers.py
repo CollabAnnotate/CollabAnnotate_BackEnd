@@ -1,9 +1,11 @@
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from .models import Project, Dataset, DataItem, Annotation, AnnotationHistory, CommunityAnnotation, ProjectVersion, Notification, ProjectCollaborator, ProjectInvitation
 from django.conf import settings
 from django.utils import timezone
+from .permissions import has_project_role, EDITOR_ROLES
 
 User = get_user_model()
 
@@ -62,8 +64,14 @@ class ProjectSerializer(serializers.ModelSerializer):
 class DatasetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Dataset
-        fields = ['id', 'name', 'description', 'project', 'file', 'uploaded_at']
-        read_only_fields = ['uploaded_at']
+        fields = ['id', 'name', 'type', 'project']
+
+    def validate_project(self, project):
+        """On ne crée ou déplace un dataset que dans un projet dont on est éditeur."""
+        user = self.context['request'].user
+        if not has_project_role(user, project, EDITOR_ROLES):
+            raise PermissionDenied("Vous n'avez pas les droits nécessaires sur ce projet.")
+        return project
 
 class DataItemSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()

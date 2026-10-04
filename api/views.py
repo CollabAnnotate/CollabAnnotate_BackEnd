@@ -1,4 +1,6 @@
 import os
+import secrets
+from datetime import timedelta
 from functools import lru_cache
 from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import api_view, permission_classes, action
@@ -14,7 +16,7 @@ from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from rest_framework_simplejwt.tokens import RefreshToken
-from .permissions import ProjectPermission
+from .permissions import ProjectPermission, DatasetPermission, visible_projects_q
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
     UserSerializer, 
@@ -184,17 +186,15 @@ class DatasetDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class DatasetViewSet(viewsets.ModelViewSet):
     serializer_class = DatasetSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : DatasetSerializer.validate_project ; modification : DatasetPermission
+    permission_classes = [permissions.IsAuthenticated, DatasetPermission]
     queryset = Dataset.objects.all()
 
     def get_queryset(self):
+        """Mêmes règles de visibilité que les projets."""
         return Dataset.objects.filter(
-            Q(project__visibility='public') | 
-            Q(project__created_by=self.request.user)
-        )
-
-    def perform_create(self, serializer):
-        serializer.save(project__created_by=self.request.user)
+            visible_projects_q(self.request.user, prefix='project__')
+        ).distinct()
 
 class DataItemViewSet(viewsets.ModelViewSet):
     serializer_class = DataItemSerializer
@@ -462,12 +462,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Projets visibles : les siens, ceux où l'on collabore, et les projets publiés."""
-        user = self.request.user
-        return Project.objects.filter(
-            Q(created_by=user) |
-            Q(collaborators__user=user) |
-            Q(status='published')
-        ).distinct()
+        return Project.objects.filter(visible_projects_q(self.request.user)).distinct()
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -760,59 +755,41 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
-        try:
-            serializer = self.get_serializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-            
-            project = serializer.validated_data['project']
-            invited_email = serializer.validated_data['invited_email']
-            
-            # Vérifier si l'utilisateur est le créateur du projet ou un admin
-            is_creator = project.created_by == request.user
-            is_admin = ProjectCollaborator.objects.filter(
-                project=project,
-                user=request.user,
-                role='admin'
-            ).exists()
-            
-            if not (is_creator or is_admin):
-                raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
-            
-            # Générer un token unique
-            import secrets
-            token = secrets.token_urlsafe(32)
-            
-            # Définir une date d'expiration (7 jours)
-            from django.utils import timezone
-            import datetime
-            expires_at = timezone.now() + datetime.timedelta(days=7)
-            
-            invitation = serializer.save(
-                invited_by=request.user,
-                token=token,
-                expires_at=expires_at,
-                status='pending'
+        # Pas de try/except global : DRF renvoie lui-même 400 (ValidationError)
+        # et 403 (PermissionDenied) ; les intercepter les transformait en 500.
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        project = serializer.validated_data['project']
+
+        # Seuls le créateur du projet et ses collaborateurs admin invitent
+        is_creator = project.created_by == request.user
+        is_admin = ProjectCollaborator.objects.filter(
+            project=project,
+            user=request.user,
+            role='admin'
+        ).exists()
+        if not (is_creator or is_admin):
+            raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
+
+        invitation = serializer.save(
+            invited_by=request.user,
+            token=secrets.token_urlsafe(32),
+            expires_at=timezone.now() + timedelta(days=7),
+            status='pending'
+        )
+
+        # Notifier l'utilisateur invité s'il a déjà un compte
+        invited_user = get_user_model().objects.filter(email=invitation.invited_email).first()
+        if invited_user:
+            Notification.objects.create(
+                user=invited_user,
+                notification_type='project_invitation',
+                content=f"Vous avez été invité à collaborer sur le projet {project.name}",
+                related_project=project
             )
-            
-            # Créer une notification pour l'utilisateur invité s'il existe
-            User = get_user_model()
-            try:
-                invited_user = User.objects.get(email=invitation.invited_email)
-                Notification.objects.create(
-                    user=invited_user,
-                    type='project_invitation',
-                    message=f"Vous avez été invité à collaborer sur le projet {project.name}",
-                    related_project=project
-                )
-            except User.DoesNotExist:
-                pass
-                
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-            
-        except serializers.ValidationError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):

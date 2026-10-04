@@ -2,7 +2,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
-from .models import User, Project, Dataset, DataItem, Annotation, ProjectCollaborator
+from .models import User, Project, Dataset, DataItem, Annotation, ProjectCollaborator, Notification, ProjectInvitation
 from io import BytesIO
 from PIL import Image
 
@@ -395,3 +395,81 @@ class ProjectStatsTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNone(response.data['quality']['acceptance_rate'])
         self.assertIsNone(response.data['quality']['completion_rate'])
+
+
+class DatasetTests(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pw-test-123')
+        self.other = User.objects.create_user(username='other', password='pw-test-123')
+        self.project = Project.objects.create(name='P', description='d', created_by=self.owner)
+
+    def test_creation_dans_son_projet(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.post(reverse('dataset-list'),
+                                    {'name': 'D', 'type': 'image', 'project': self.project.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Dataset.objects.get().project, self.project)
+
+    def test_creation_dans_le_projet_d_un_autre_refusee(self):
+        self.client.force_authenticate(user=self.other)
+        response = self.client.post(reverse('dataset-list'),
+                                    {'name': 'D', 'type': 'image', 'project': self.project.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Dataset.objects.count(), 0)
+
+    def test_creation_dans_un_projet_publie_d_un_autre_refusee(self):
+        self.project.status = 'published'
+        self.project.save()
+        self.client.force_authenticate(user=self.other)
+        response = self.client.post(reverse('dataset-list'),
+                                    {'name': 'D', 'type': 'image', 'project': self.project.id}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Dataset.objects.count(), 0)
+
+    def test_modification_par_un_autre_refusee(self):
+        self.project.status = 'published'
+        self.project.save()
+        dataset = Dataset.objects.create(name='D', type='image', project=self.project)
+        self.client.force_authenticate(user=self.other)
+        response = self.client.patch(reverse('dataset-detail', args=[dataset.id]), {'name': 'x'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class InvitationTests(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', email='owner@example.com', password='pw-test-123')
+        self.guest = User.objects.create_user(username='guest', email='guest@example.com', password='pw-test-123')
+        self.project = Project.objects.create(name='P', description='d', created_by=self.owner)
+
+    def invite(self, email='guest@example.com'):
+        return self.client.post(reverse('project-invitation-list'),
+                                {'project': self.project.id, 'invited_email': email, 'role': 'annotator'},
+                                format='json')
+
+    def test_inviter_un_utilisateur_existant_cree_une_notification(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.invite()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        notification = Notification.objects.get(user=self.guest)
+        self.assertEqual(notification.notification_type, 'project_invitation')
+        self.assertIn('P', notification.content)
+
+    def test_inviter_un_email_inconnu(self):
+        self.client.force_authenticate(user=self.owner)
+        self.assertEqual(self.invite('nouveau@example.com').status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_non_proprietaire_recoit_403_et_non_500(self):
+        self.project.status = 'published'
+        self.project.save()
+        self.client.force_authenticate(user=self.guest)
+        self.assertEqual(self.invite('x@example.com').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(ProjectInvitation.objects.count(), 0)
+
+    def test_l_invite_accepte_et_devient_collaborateur(self):
+        self.client.force_authenticate(user=self.owner)
+        invitation_id = self.invite().data['id']
+        self.client.force_authenticate(user=self.guest)
+        response = self.client.post(reverse('project-invitation-accept', args=[invitation_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(ProjectCollaborator.objects.filter(project=self.project, user=self.guest).exists())
