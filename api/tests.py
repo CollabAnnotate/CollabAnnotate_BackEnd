@@ -3,7 +3,8 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 from .models import User, Project, Dataset, DataItem, Annotation
-import os
+from io import BytesIO
+from PIL import Image
 
 class AuthTests(APITestCase):
     def test_register_user(self):
@@ -12,6 +13,7 @@ class AuthTests(APITestCase):
             'username': 'testuser',
             'email': 'test@example.com',
             'password': 'testpassword123',
+            'password2': 'testpassword123',
             'role': 'annotateur'
         }
         response = self.client.post(url, data, format='json')
@@ -36,11 +38,11 @@ class ProjectTests(APITestCase):
         self.client.force_authenticate(user=self.user)
 
     def test_create_project(self):
-        url = reverse('project-list-create')
+        url = reverse('project-list')
         data = {
             'name': 'Test Project',
             'description': 'This is a test project',
-            'status': 'en_cours'
+            'status': 'draft'
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -49,7 +51,7 @@ class ProjectTests(APITestCase):
 
     def test_list_projects(self):
         Project.objects.create(name='Test Project', description='Test Description', created_by=self.user)
-        url = reverse('project-list-create')
+        url = reverse('project-list')
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 1)
@@ -61,12 +63,13 @@ class YOLOTests(APITestCase):
 
     def test_upload_and_detect(self):
         url = reverse('detect_objects')
-        image_path = os.path.join(os.path.dirname(__file__), 'test_image.jpg')  # Remplace par le chemin d'une image de test
-        with open(image_path, 'rb') as image_file:
-            image = SimpleUploadedFile('test_image.jpg', image_file.read(), content_type='image/jpeg')
-            response = self.client.post(url, {'image': image}, format='multipart')
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            self.assertIn('detections', response.data)
+        # Image générée en mémoire : pas de fichier de test à maintenir
+        buffer = BytesIO()
+        Image.new('RGB', (64, 64), color='white').save(buffer, format='JPEG')
+        image = SimpleUploadedFile('test_image.jpg', buffer.getvalue(), content_type='image/jpeg')
+        response = self.client.post(url, {'image': image}, format='multipart')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('detections', response.data)
 
 class AnnotationTests(APITestCase):
     def setUp(self):
