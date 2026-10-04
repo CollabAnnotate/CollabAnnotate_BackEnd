@@ -347,3 +347,51 @@ class ReviewTests(APITestCase):
         self.client.force_authenticate(user=self.reviewer)
         response = self.client.post(reverse('validate_annotation', args=[999]), {'status': 'validé'}, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class ProjectStatsTests(APITestCase):
+    """Statistiques consommées par les écrans Rapports et Détail du projet."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pw-test-123')
+        self.project = Project.objects.create(name='P', description='d', created_by=self.owner)
+        dataset = Dataset.objects.create(name='D', type='image', project=self.project)
+        annotated = DataItem.objects.create(dataset=dataset, file_path='/a', metadata={})
+        DataItem.objects.create(dataset=dataset, file_path='/b', metadata={})  # image non annotée
+
+        def annotate(label, confidence, validation_status=None):
+            Annotation.objects.create(
+                dataitem=annotated, label=label, confidence=confidence, created_by=self.owner,
+                is_validated=validation_status is not None, validation_status=validation_status)
+
+        annotate('car', 0.9, 'validé')
+        annotate('car', 0.7, 'rejeté')
+        annotate('person', 0.8)
+        self.client.force_authenticate(user=self.owner)
+
+    def test_stats_fournit_les_donnees_des_graphiques(self):
+        response = self.client.get(reverse('project-stats', args=[self.project.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+        # Compteurs utilisés par ProjectDetail
+        self.assertEqual(data['total_images'], 2)
+        self.assertEqual(data['total_annotations'], 3)
+        self.assertEqual(data['pending_annotations'], 1)
+        # Graphiques
+        self.assertEqual(data['annotations_by_label'], [
+            {'name': 'car', 'value': 2}, {'name': 'person', 'value': 1}])
+        self.assertEqual(data['validation_breakdown'], [
+            {'name': 'Validées', 'value': 1},
+            {'name': 'Rejetées', 'value': 1},
+            {'name': 'En attente', 'value': 1}])
+        # Indicateurs
+        self.assertAlmostEqual(data['quality']['acceptance_rate'], 0.5)
+        self.assertAlmostEqual(data['quality']['average_confidence'], 0.8)
+        self.assertAlmostEqual(data['quality']['completion_rate'], 0.5)
+
+    def test_stats_projet_vide_sans_division_par_zero(self):
+        empty = Project.objects.create(name='Vide', description='d', created_by=self.owner)
+        response = self.client.get(reverse('project-stats', args=[empty.id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['quality']['acceptance_rate'])
+        self.assertIsNone(response.data['quality']['completion_rate'])

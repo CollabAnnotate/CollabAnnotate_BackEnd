@@ -522,18 +522,42 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['GET'])
     def stats(self, request, pk=None):
         project = self.get_object()
-        datasets = Dataset.objects.filter(project=project)
-        dataitems = DataItem.objects.filter(dataset__in=datasets)
-        annotations = Annotation.objects.filter(dataitem__in=dataitems)
+        dataitems = DataItem.objects.filter(dataset__project=project)
+        annotations = Annotation.objects.filter(dataitem__dataset__project=project)
         collaborators = ProjectCollaborator.objects.filter(project=project)
 
+        total_images = dataitems.count()
+        accepted = annotations.filter(validation_status='validé').count()
+        rejected = annotations.filter(validation_status='rejeté').count()
+        pending = annotations.filter(is_validated=False).count()
+        annotated_images = dataitems.filter(annotation__isnull=False).distinct().count()
+        avg_confidence = annotations.aggregate(avg=models.Avg('confidence'))['avg']
+
         stats = {
-            'total_images': dataitems.count(),
+            'total_images': total_images,
             'total_annotations': annotations.count(),
-            'pending_annotations': annotations.filter(is_validated=False).count(),
+            'pending_annotations': pending,
             'total_collaborators': collaborators.count() + 1,  # +1 pour inclure le créateur
             'validated_annotations': annotations.filter(is_validated=True).count(),
-            'rejected_annotations': annotations.filter(validation_status='rejeté').count(),
+            'rejected_annotations': rejected,
+            # Données prêtes pour les graphiques de l'écran Rapports
+            'annotations_by_label': [
+                {'name': row['label'], 'value': row['count']}
+                for row in annotations.values('label')
+                .annotate(count=models.Count('id'))
+                .order_by('-count')
+            ],
+            'validation_breakdown': [
+                {'name': 'Validées', 'value': accepted},
+                {'name': 'Rejetées', 'value': rejected},
+                {'name': 'En attente', 'value': pending},
+            ],
+            # Indicateurs mesurables sans vérité terrain (None si pas encore de données)
+            'quality': {
+                'acceptance_rate': accepted / (accepted + rejected) if accepted + rejected else None,
+                'average_confidence': avg_confidence,
+                'completion_rate': annotated_images / total_images if total_images else None,
+            },
         }
 
         return Response(stats)
