@@ -552,3 +552,70 @@ class PasswordChangeTests(APITestCase):
                          status.HTTP_200_OK)
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password('Nouveau-Mdp-Solide-2'))
+
+
+class ProjectListCountersTests(APITestCase):
+    """Compteurs affichés par le tableau de bord et la liste des projets."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(username='owner', password='pw-test-123')
+        self.client.force_authenticate(user=self.owner)
+        self.project = Project.objects.create(name='P', description='d', created_by=self.owner)
+        dataset = Dataset.objects.create(name='D', type='image', project=self.project)
+        item = DataItem.objects.create(dataset=dataset, file_path='/a', metadata={})
+        DataItem.objects.create(dataset=dataset, file_path='/b', metadata={})
+        Annotation.objects.create(dataitem=item, label='car', created_by=self.owner)
+        Annotation.objects.create(dataitem=item, label='car', created_by=self.owner,
+                                  is_validated=True, validation_status='validé')
+
+    def test_la_liste_expose_les_compteurs(self):
+        project = self.client.get(reverse('project-list')).data[0]
+        self.assertEqual(project['total_images'], 2)
+        self.assertEqual(project['total_annotations'], 2)
+        self.assertEqual(project['pending_annotations'], 1)
+        self.assertFalse(project['is_published'])
+
+    def test_creation_renvoie_des_compteurs_a_zero(self):
+        response = self.client.post(reverse('project-list'), {'name': 'N', 'description': 'd'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['total_images'], 0)
+
+    def test_creation_publique_publie_le_projet(self):
+        response = self.client.post(reverse('project-list'),
+                                    {'name': 'N', 'description': 'd', 'visibility': 'public'}, format='json')
+        self.assertTrue(response.data['is_published'])
+        self.assertEqual(response.data['visibility'], 'public')
+
+    def test_publier_met_a_jour_la_visibilite(self):
+        self.client.post(reverse('project-publish', args=[self.project.id]))
+        self.project.refresh_from_db()
+        self.assertEqual((self.project.status, self.project.visibility), ('published', 'public'))
+        self.assertIsNotNone(self.project.published_at)
+        self.client.post(reverse('project-unpublish', args=[self.project.id]))
+        self.project.refresh_from_db()
+        self.assertEqual((self.project.status, self.project.visibility), ('draft', 'private'))
+
+
+class NotificationTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='u', password='pw-test-123')
+        self.other = User.objects.create_user(username='o', password='pw-test-123')
+        self.notification = Notification.objects.create(
+            user=self.user, notification_type='project_invitation', content='Invité sur P')
+        Notification.objects.create(user=self.other, notification_type='new_annotation', content='x')
+        self.client.force_authenticate(user=self.user)
+
+    def test_liste_ses_seules_notifications_avec_un_titre(self):
+        data = self.client.get(reverse('notification-list')).data
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['title'], 'Invitation à un projet')
+
+    def test_creation_directe_interdite(self):
+        response = self.client.post(reverse('notification-list'),
+                                    {'notification_type': 'new_annotation', 'content': 'spam'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_marquer_comme_lue(self):
+        self.client.post(reverse('notification-mark-as-read', args=[self.notification.id]))
+        self.notification.refresh_from_db()
+        self.assertTrue(self.notification.is_read)

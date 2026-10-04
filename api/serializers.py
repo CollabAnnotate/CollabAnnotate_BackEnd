@@ -74,20 +74,35 @@ class AdminUserSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 class ProjectSerializer(serializers.ModelSerializer):
-    is_published = serializers.BooleanField(read_only=True)
+    is_published = serializers.SerializerMethodField()
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
-    
+    # Compteurs annotés par ProjectViewSet.get_queryset ; 0 sur un projet tout juste créé
+    total_images = serializers.SerializerMethodField()
+    total_annotations = serializers.SerializerMethodField()
+    pending_annotations = serializers.SerializerMethodField()
+
     class Meta:
         model = Project
         fields = [
             'id', 'name', 'description', 'created_at', 'created_by',
             'created_by_username', 'status', 'visibility', 'published_at',
-            'tags', 'allow_community_annotations', 'is_published'
+            'tags', 'allow_community_annotations', 'is_published',
+            'total_images', 'total_annotations', 'pending_annotations'
         ]
-        read_only_fields = ['created_by', 'created_at', 'published_at']
+        # Statut et visibilité changent via les actions publish/unpublish
+        read_only_fields = ['created_by', 'created_at', 'published_at', 'status', 'visibility']
 
     def get_is_published(self, obj):
         return obj.status == 'published'
+
+    def get_total_images(self, obj):
+        return getattr(obj, 'total_images', 0)
+
+    def get_total_annotations(self, obj):
+        return getattr(obj, 'total_annotations', 0)
+
+    def get_pending_annotations(self, obj):
+        return getattr(obj, 'pending_annotations', 0)
 
 class DatasetSerializer(serializers.ModelSerializer):
     class Meta:
@@ -215,10 +230,13 @@ class ProjectVersionSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_by', 'created_at', 'version_number']
 
 class NotificationSerializer(serializers.ModelSerializer):
+    # Libellé lisible du type, ex. « Invitation à un projet »
+    title = serializers.CharField(source='get_notification_type_display', read_only=True)
+
     class Meta:
         model = Notification
         fields = [
-            'id', 'user', 'notification_type', 'content',
+            'id', 'user', 'notification_type', 'title', 'content',
             'related_project', 'created_at', 'is_read'
         ]
         read_only_fields = ['user', 'created_at']

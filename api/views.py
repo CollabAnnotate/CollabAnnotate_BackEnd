@@ -464,10 +464,29 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Projets visibles : les siens, ceux où l'on collabore, et les projets publiés."""
-        return Project.objects.filter(visible_projects_q(self.request.user)).distinct()
+        visible_ids = Project.objects.filter(visible_projects_q(self.request.user)).values('id')
+        # Compteurs calculés en SQL (GROUP BY) pour tous les projets d'un coup,
+        # plutôt qu'une requête par projet (problème N+1)
+        return (
+            Project.objects.filter(id__in=visible_ids)
+            .select_related('created_by')
+            .annotate(
+                total_images=models.Count('dataset__dataitem', distinct=True),
+                total_annotations=models.Count('dataset__dataitem__annotation', distinct=True),
+                pending_annotations=models.Count(
+                    'dataset__dataitem__annotation',
+                    filter=Q(dataset__dataitem__annotation__is_validated=False),
+                    distinct=True,
+                ),
+            )
+            .order_by('-created_at')
+        )
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        project = serializer.save(created_by=self.request.user)
+        # « Public » à la création = publié (visibility/status sont en lecture seule)
+        if self.request.data.get('visibility') == 'public':
+            project.publish()
 
     @action(detail=True, methods=['POST'])
     def add_images(self, request, pk=None):
@@ -563,15 +582,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def publish(self, request, pk=None):
         # Réservé au propriétaire : contrôlé par ProjectPermission dans get_object()
         project = self.get_object()
-        project.status = 'published'
-        project.save()
+        project.publish()  # met aussi à jour visibility et published_at
         return Response({'status': 'published'})
 
     @action(detail=True, methods=['POST'])
     def unpublish(self, request, pk=None):
         project = self.get_object()
-        project.status = 'draft'
-        project.save()
+        project.unpublish()
         return Response({'status': 'draft'})
 
     @action(detail=True, methods=['POST'])
@@ -662,7 +679,8 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         
         return Response({"status": "flagged"})
 
-class NotificationViewSet(viewsets.ModelViewSet):
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """Les notifications sont créées par le système : l'utilisateur ne fait que les lire."""
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
     queryset = Notification.objects.all()
