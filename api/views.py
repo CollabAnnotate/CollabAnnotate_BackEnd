@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -9,7 +10,6 @@ from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
-from ultralytics import YOLO
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
@@ -160,7 +160,12 @@ class DataItemViewSet(viewsets.ModelViewSet):
         )
 
 MODEL_PATH = "yolov8n.pt"
-model = YOLO(MODEL_PATH)
+
+@lru_cache(maxsize=1)
+def get_model():
+    """Charge le modèle YOLO au premier appel seulement (torch est lourd en mémoire)."""
+    from ultralytics import YOLO
+    return YOLO(MODEL_PATH)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -174,6 +179,7 @@ def upload_and_detect(request):
         path = default_storage.save(file_path, ContentFile(image.read()))
         img_path = default_storage.path(path)
 
+        model = get_model()
         results = model(img_path)
         detected_objects = []
 
@@ -213,7 +219,7 @@ def detect_objects(request):
 
         try:
             # Faire la détection avec YOLO
-            results = model(full_path)
+            results = get_model()(full_path)
             
             # Convertir les résultats en format JSON
             detections = []
@@ -519,6 +525,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             image_path = data_item.image.path
             
             # Utiliser YOLO pour détecter les objets
+            model = get_model()
             results = model(image_path)
             detected_objects = []
             

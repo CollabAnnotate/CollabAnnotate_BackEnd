@@ -14,20 +14,27 @@ from pathlib import Path
 import os
 from datetime import timedelta
 
+import environ
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Variables d'environnement lues depuis le fichier .env (voir .env.example)
+env = environ.Env(
+    DEBUG=(bool, False),
+    ALLOWED_HOSTS=(list, ['localhost', '127.0.0.1']),
+    CORS_ALLOWED_ORIGINS=(list, ['http://localhost:3000']),
+)
+environ.Env.read_env(BASE_DIR / '.env')
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-l_(60yge0*om(wpbz#cgb0@#y!czom0t!)4emn8vq4e^ko9ky0'
+SECRET_KEY = env('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env('DEBUG')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = env('ALLOWED_HOSTS')
 
 
 # Application definition
@@ -40,8 +47,9 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',  
-    'rest_framework_simplejwt',  
-    'corsheaders',  
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'corsheaders',
     'api',  
 ]
 
@@ -66,9 +74,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Frontend React
-]
+CORS_ALLOWED_ORIGINS = env('CORS_ALLOWED_ORIGINS')  # Frontend React
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -120,17 +126,7 @@ AUTH_USER_MODEL = 'api.User'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'yolo_annotation',
-        'USER': 'yolo_admin',
-        'PASSWORD': 'NouveauMotDePasse123',
-        'HOST': 'localhost',
-        'PORT': '5432',
-        'OPTIONS': {
-            'client_encoding': 'UTF8',
-        },
-    }
+    'default': env.db('DATABASE_URL'),
 }
 
 # Password validation
