@@ -84,15 +84,27 @@ class DataItemSerializer(serializers.ModelSerializer):
 
 class AnnotationSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Annotation
         fields = [
-            'id', 'dataitem', 'label', 'x_min', 'y_min', 'x_max', 'y_max',
-            'created_by', 'created_by_username', 'created_at', 'is_validated',
-            'validation_status', 'validation_comment'
+            'id', 'dataitem', 'image_url', 'label', 'x_min', 'y_min', 'x_max', 'y_max',
+            'confidence', 'created_by', 'created_by_username', 'created_at', 'is_validated',
+            'validation_status', 'validation_comment', 'validated_by', 'validated_at'
         ]
-        read_only_fields = ['created_by', 'created_at', 'is_validated', 'validation_status']
+        read_only_fields = [
+            'created_by', 'created_at', 'is_validated', 'validation_status',
+            'validation_comment', 'validated_by', 'validated_at'
+        ]
+
+    def get_image_url(self, obj):
+        """URL absolue de l'image annotée (portée par le DataItem)."""
+        image = obj.dataitem.image
+        if not image:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(image.url) if request else image.url
 
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user

@@ -343,8 +343,12 @@ def get_annotations_for_review(request):
     if user.role not in ['verificateur', 'admin']:
         return Response({"error": "Permission refusée"}, status=403)
 
-    annotations = Annotation.objects.filter(is_validated=False)
-    serializer = AnnotationSerializer(annotations, many=True)
+    annotations = (
+        Annotation.objects.filter(is_validated=False)
+        .select_related('dataitem', 'created_by')
+        .order_by('created_at')
+    )
+    serializer = AnnotationSerializer(annotations, many=True, context={'request': request})
     return Response(serializer.data)
 
 @api_view(['POST'])
@@ -356,23 +360,22 @@ def validate_annotation(request, annotation_id):
 
     try:
         annotation = Annotation.objects.get(id=annotation_id)
-        status = request.data.get('status')
-        comment = request.data.get('comment', '')
-
-        if status not in ['validé', 'rejeté']:
-            return Response({"error": "Statut invalide"}, status=400)
-
-        annotation.is_validated = True
-        annotation.validation_status = status
-        annotation.validation_comment = comment
-        annotation.validated_by = user
-        annotation.save()
-
-        return Response({"message": "Annotation mise à jour avec succès"})
     except Annotation.DoesNotExist:
-        return Response({"error": "Annotation non trouvée"}, status=404)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        return Response({"error": "Annotation non trouvée"}, status=status.HTTP_404_NOT_FOUND)
+
+    # Ne pas nommer cette variable `status` : elle masquerait le module rest_framework.status
+    validation_status = request.data.get('status')
+    if validation_status not in ['validé', 'rejeté']:
+        return Response({"error": "Statut invalide"}, status=status.HTTP_400_BAD_REQUEST)
+
+    annotation.is_validated = True
+    annotation.validation_status = validation_status
+    annotation.validation_comment = request.data.get('comment', '')
+    annotation.validated_by = user
+    annotation.validated_at = timezone.now()
+    annotation.save()
+
+    return Response({"message": "Annotation mise à jour avec succès"})
 
 class AnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = AnnotationSerializer

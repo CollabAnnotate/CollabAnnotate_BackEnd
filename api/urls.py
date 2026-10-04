@@ -43,12 +43,15 @@ urlpatterns = [
     path('token/logout/', LogoutView.as_view(), name='token_logout'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
     
+    # Routes spécifiques AVANT le router : Django s'arrête à la première route qui
+    # correspond, et 'annotations/<pk>/' du router capturerait 'review' comme pk.
+    path('annotations/review/', get_annotations_for_review, name='get_annotations_for_review'),
+    path('annotations/<int:annotation_id>/validate/', validate_annotation, name='validate_annotation'),
+
     # Routes API
     path('', include(router.urls)),
     path('detect/', detect_objects, name='detect-objects'),
     path('upload-and-detect/', upload_and_detect, name='upload_and_detect'),
     path('detect-objects/', detect_objects, name='detect_objects'),
     path('save-annotations/', save_annotations, name='save_annotations'),
-    path('annotations/review/', get_annotations_for_review, name='get_annotations_for_review'),
-    path('annotations/<int:annotation_id>/validate/', validate_annotation, name='validate_annotation'),
 ]
