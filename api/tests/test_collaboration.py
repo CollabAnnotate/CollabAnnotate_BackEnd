@@ -252,7 +252,7 @@ def invitation_url(invitation, action=None):
 
 
 @pytest.mark.django_db
-def test_invite_ne_peut_pas_modifier_son_invitation(api_client, guest, invitation):
+def test_invite_ne_peut_pas_modifier_son_invitation(api_client, guest, project, invitation):
     autre_projet = ProjectFactory()
     api_client.force_authenticate(user=guest)
 
@@ -262,7 +262,7 @@ def test_invite_ne_peut_pas_modifier_son_invitation(api_client, guest, invitatio
     assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
     invitation.refresh_from_db()
     assert invitation.role == 'viewer'
-    assert invitation.project_id != autre_projet.id
+    assert invitation.project_id == project.id
 
 
 @pytest.mark.django_db
@@ -373,8 +373,10 @@ def test_acceptation_atomique(api_client, guest, project, invitation, monkeypatc
     api_client.raise_request_exception = False
     api_client.force_authenticate(user=guest)
 
-    api_client.post(invitation_url(invitation, 'accept'))
+    response = api_client.post(invitation_url(invitation, 'accept'))
 
+    # La panne n'est plus maquillée en 400 avec le message SQL
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
     invitation.refresh_from_db()
     assert invitation.status == 'pending'
@@ -387,12 +389,15 @@ def test_acceptation_atomique(api_client, guest, project, invitation, monkeypatc
 ], ids=['expiree', 'deja_traitee'])
 def test_accepter_une_invitation_expiree_ou_deja_traitee(api_client, guest, project, champs):
     invitation = ProjectInvitationFactory(project=project, invited_email=guest.email, **champs)
+    statut_initial = invitation.status
     api_client.force_authenticate(user=guest)
 
     response = api_client.post(invitation_url(invitation, 'accept'))
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
     assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
+    invitation.refresh_from_db()
+    assert invitation.status == statut_initial
 
 
 @pytest.mark.django_db
@@ -415,3 +420,111 @@ def test_invite_peut_refuser(api_client, guest, invitation):
     assert response.status_code == status.HTTP_200_OK
     invitation.refresh_from_db()
     assert invitation.status == 'rejected'
+
+
+@pytest.mark.django_db
+def test_liste_sans_doublon_quand_le_projet_a_plusieurs_collaborateurs(auth_client, project, invitation):
+    ProjectCollaboratorFactory(project=project, role='admin')
+    ProjectCollaboratorFactory(project=project, role='editor')
+
+    response = auth_client.get(reverse('project-invitation-list'))
+
+    assert response.status_code == status.HTTP_200_OK
+    assert [i['id'] for i in response.data] == [invitation.id]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('action', ['accept', 'reject'])
+@pytest.mark.parametrize('role', ['owner', 'admin'])
+def test_gestionnaire_ne_peut_pas_repondre_a_la_place_de_l_invite(api_client, user, project, invitation, role, action):
+    acteur = user if role == 'owner' else ProjectCollaboratorFactory(project=project, role='admin').user
+    membres_avant = ProjectCollaborator.objects.filter(project=project).count()
+    api_client.force_authenticate(user=acteur)
+
+    response = api_client.post(invitation_url(invitation, action))
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    invitation.refresh_from_db()
+    assert invitation.status == 'pending'
+    assert ProjectCollaborator.objects.filter(project=project).count() == membres_avant
+
+
+# Concurrence : l'instance en mémoire a été lue avant qu'une autre requête ne change la ligne
+
+@pytest.mark.django_db
+def test_accepter_une_invitation_refusee_entre_temps_ne_cree_rien(guest, project, invitation):
+    ProjectInvitation.objects.filter(pk=invitation.pk).update(status='rejected')
+
+    assert invitation.accept(guest) is False
+
+    assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
+    invitation.refresh_from_db()
+    assert invitation.status == 'rejected'
+
+
+@pytest.mark.django_db
+def test_accepter_une_invitation_supprimee_entre_temps_ne_la_recree_pas(guest, project, invitation):
+    ProjectInvitation.objects.filter(pk=invitation.pk).delete()
+
+    assert invitation.accept(guest) is False
+
+    assert not ProjectInvitation.objects.filter(pk=invitation.pk).exists()
+    assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
+
+
+@pytest.mark.django_db
+def test_refuser_une_invitation_acceptee_entre_temps_ne_change_rien(invitation):
+    ProjectInvitation.objects.filter(pk=invitation.pk).update(status='accepted')
+
+    assert invitation.reject() is False
+
+    invitation.refresh_from_db()
+    assert invitation.status == 'accepted'
+
+
+# Création : droits vérifiés avant toute validation qui renseignerait sur le projet
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('role, attendu', [
+    ('owner', status.HTTP_201_CREATED),
+    ('admin', status.HTTP_201_CREATED),
+    ('editor', status.HTTP_403_FORBIDDEN),
+    ('stranger', status.HTTP_403_FORBIDDEN),
+])
+def test_creation_d_invitation_selon_le_role(api_client, user, project, role, attendu):
+    if role == 'owner':
+        acteur = user
+    elif role == 'stranger':
+        acteur = UserFactory()
+    else:
+        acteur = ProjectCollaboratorFactory(project=project, role=role).user
+    api_client.force_authenticate(user=acteur)
+
+    response = api_client.post(reverse('project-invitation-list'),
+                               {'project': project.id, 'invited_email': 'nouveau@example.com', 'role': 'viewer'},
+                               format='json')
+
+    assert response.status_code == attendu
+    creee = ProjectInvitation.objects.filter(project=project, invited_email='nouveau@example.com').exists()
+    assert creee is (attendu == status.HTTP_201_CREATED)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('cas', ['membre', 'invitation_en_attente'])
+@pytest.mark.parametrize('role', ['editor', 'stranger'])
+def test_creation_ne_revele_pas_l_equipe_d_un_projet_prive(api_client, project, guest, role, cas):
+    if cas == 'membre':
+        ProjectCollaboratorFactory(project=project, user=guest)
+    else:
+        ProjectInvitationFactory(project=project, invited_email=guest.email)
+    acteur = UserFactory() if role == 'stranger' else ProjectCollaboratorFactory(project=project, role=role).user
+    invitations_avant = ProjectInvitation.objects.count()
+    api_client.force_authenticate(user=acteur)
+
+    response = api_client.post(reverse('project-invitation-list'),
+                               {'project': project.id, 'invited_email': guest.email, 'role': 'viewer'},
+                               format='json')
+
+    # 403 et non 400 « déjà collaborateur » / « déjà invité », qui renseignerait sur l'équipe
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert ProjectInvitation.objects.count() == invitations_avant
