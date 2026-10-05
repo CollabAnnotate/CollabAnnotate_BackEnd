@@ -89,6 +89,19 @@ class CollaboratorPermission(BasePermission):
         return has_project_role(request.user, obj.project, ('admin',))
 
 
+class InvitationPermission(BasePermission):
+    """
+    Une invitation ne se modifie jamais (pas d'update exposé). L'invité l'accepte ou la
+    refuse ; seuls le propriétaire et les administrateurs du projet la suppriment.
+    """
+    message = "Seuls le propriétaire et les administrateurs du projet gèrent les invitations."
+
+    def has_object_permission(self, request, view, obj):
+        if request.method in SAFE_METHODS or view.action in ('accept', 'reject'):
+            return True
+        return has_project_role(request.user, obj.project, ('admin',))
+
+
 class CommunityAnnotationPermission(BasePermission):
     """
     Annotations communautaires : modifiables par leur auteur seulement ; supprimables

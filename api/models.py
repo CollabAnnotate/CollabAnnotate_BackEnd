@@ -1,5 +1,5 @@
 from django.contrib.auth.models import AbstractUser, Group, Permission
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 
@@ -266,14 +266,19 @@ class ProjectInvitation(models.Model):
         return timezone.now() > self.expires_at
 
     def accept(self, user):
-        if self.status == 'pending' and not self.is_expired():
-            ProjectCollaborator.objects.create(
+        """
+        Ajoute l'invité au projet avec le rôle de l'invitation. Un membre existant garde
+        son rôle actuel. Tout ou rien : si l'invitation ne peut être enregistrée,
+        aucun collaborateur n'est créé.
+        """
+        if self.status != 'pending' or self.is_expired():
+            return False
+        with transaction.atomic():
+            ProjectCollaborator.objects.get_or_create(
                 project=self.project,
                 user=user,
-                role=self.role,
-                added_by=self.invited_by
+                defaults={'role': self.role, 'added_by': self.invited_by},
             )
             self.status = 'accepted'
             self.save()
-            return True
-        return False
+        return True
