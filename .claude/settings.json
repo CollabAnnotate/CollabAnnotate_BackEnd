@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(venv/Scripts/python.exe -m pytest:*)",
+      "Bash(ruff check:*)",
+      "Bash(venv/Scripts/python.exe -m ruff check:*)",
+      "Bash(python manage.py makemigrations --check:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)"
+    ],
+    "deny": [
+      "Read(./.env)"
+    ]
+  }
+}
