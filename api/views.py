@@ -2,21 +2,39 @@ import os
 import secrets
 from datetime import timedelta
 from functools import lru_cache
-from rest_framework import generics, permissions, status, viewsets, serializers
-from rest_framework.decorators import api_view, permission_classes, action
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.response import Response
-from rest_framework.views import APIView
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+
 from django.conf import settings
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.db import models
+from django.db.models import Q
+from django.utils import timezone
+from rest_framework import generics, permissions, serializers, status, viewsets
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+from .models import (
+    Annotation,
+    AnnotationHistory,
+    CommunityAnnotation,
+    DataItem,
+    Dataset,
+    Notification,
+    Project,
+    ProjectCollaborator,
+    ProjectInvitation,
+)
 from .permissions import (
     AnnotationPermission,
     CollaboratorPermission,
@@ -28,26 +46,19 @@ from .permissions import (
     has_project_role,
     visible_projects_q,
 )
-from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
-    UserSerializer,
     AdminUserSerializer,
-    ProjectSerializer, 
-    DatasetSerializer,
-    AnnotationSerializer,
     AnnotationHistorySerializer,
+    AnnotationSerializer,
     CommunityAnnotationSerializer,
-    NotificationSerializer,
     DataItemSerializer,
+    DatasetSerializer,
+    NotificationSerializer,
     ProjectCollaboratorSerializer,
-    ProjectInvitationSerializer
+    ProjectInvitationSerializer,
+    ProjectSerializer,
+    UserSerializer,
 )
-from rest_framework import viewsets
-from django.db.models import Q
-from django.utils import timezone
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.exceptions import PermissionDenied
-from django.db import models
 
 User = get_user_model()
 
@@ -133,7 +144,7 @@ def register_user(request):
                 "status": "error",
                 "errors": serializer.errors
             }, status=status.HTTP_400_BAD_REQUEST)
-        
+
         user = serializer.save()
 
         # Pas de tokens ici : l'utilisateur se connecte ensuite via token/
@@ -147,7 +158,7 @@ def register_user(request):
             },
             "message": "Utilisateur créé avec succès"
         }, status=status.HTTP_201_CREATED)
-        
+
     except Exception as e:
         return Response({
             "status": "error",
@@ -272,7 +283,7 @@ def detect_objects(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         image = request.FILES['image']
-        
+
         # Sauvegarder temporairement l'image
         temp_path = default_storage.save('temp_detections/' + image.name, ContentFile(image.read()))
         full_path = default_storage.path(temp_path)
@@ -280,7 +291,7 @@ def detect_objects(request):
         try:
             # Faire la détection avec YOLO
             results = get_model()(full_path)
-            
+
             # Convertir les résultats en format JSON
             detections = []
             for result in results:
@@ -438,7 +449,7 @@ class AnnotationViewSet(viewsets.ModelViewSet):
         annotation.x_max = history.previous_x_max
         annotation.y_max = history.previous_y_max
         annotation.save()
-        
+
         return Response({"message": "Annotation restaurée avec succès"})
 
 class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
@@ -455,7 +466,7 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
         if annotation_id:
             queryset = queryset.filter(annotation_id=annotation_id)
-            
+
         return queryset.order_by('-modified_at')
 
 class ProjectViewSet(viewsets.ModelViewSet):
@@ -495,7 +506,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def add_images(self, request, pk=None):
         project = self.get_object()
         files = request.FILES.getlist('images')
-        
+
         if not files:
             return Response(
                 {'error': 'Aucune image fournie'},
@@ -506,7 +517,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             project=project,
             defaults={'name': f'Dataset for {project.name}'}
         )
-        
+
         created_items = []
         for file in files:
             data_item = DataItem.objects.create(
@@ -515,7 +526,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 created_by=request.user
             )
             created_items.append(data_item)
-        
+
         serializer = DataItemSerializer(created_items, many=True, context={'request': request})
         return Response(serializer.data)
 
@@ -523,10 +534,10 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def get_images(self, request, pk=None):
         project = self.get_object()
         dataset = project.dataset_set.first()
-        
+
         if not dataset:
             return Response([])
-            
+
         data_items = dataset.dataitem_set.all()
         serializer = DataItemSerializer(data_items, many=True, context={'request': request})
         return Response(serializer.data)
@@ -605,15 +616,15 @@ class ProjectViewSet(viewsets.ModelViewSet):
             image_id = request.data.get('image_id')
             if not image_id:
                 return Response({"error": "ID de l'image requis"}, status=400)
-                
+
             data_item = DataItem.objects.get(id=image_id, dataset__project=project)
             image_path = data_item.image.path
-            
+
             # Utiliser YOLO pour détecter les objets
             model = get_model()
             results = model(image_path)
             detected_objects = []
-            
+
             for result in results:
                 if hasattr(result, 'boxes'):
                     for box in result.boxes:
@@ -625,9 +636,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
                             'x_max': float(box.xyxy[0][2]) / data_item.image.width,
                             'y_max': float(box.xyxy[0][3]) / data_item.image.height
                         })
-            
+
             return Response(detected_objects)
-            
+
         except DataItem.DoesNotExist:
             return Response({"error": "Image non trouvée"}, status=404)
         except Exception as e:
@@ -646,14 +657,14 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         dataitem = serializer.validated_data['dataitem']
         project = dataitem.dataset.project
-        
+
         if project.visibility != 'public' or not project.allow_community_annotations:
             raise PermissionDenied(
                 "Ce projet n'accepte pas les annotations communautaires"
             )
-            
+
         serializer.save(created_by=self.request.user)
-        
+
         # Créer une notification pour le propriétaire du projet
         Notification.objects.create(
             user=project.created_by,
@@ -666,11 +677,11 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
     def flag(self, request, pk=None):
         annotation = self.get_object()
         reason = request.data.get('reason', '')
-        
+
         annotation.is_flagged = True
         annotation.flag_reason = reason
         annotation.save()
-        
+
         # Notifier le propriétaire du projet
         project = annotation.dataitem.dataset.project
         Notification.objects.create(
@@ -679,7 +690,7 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
             content=f"Une annotation a été signalée dans votre projet {project.name}",
             related_project=project
         )
-        
+
         return Response({"status": "flagged"})
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -707,10 +718,10 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
     queryset = User.objects.all()
-    
+
     def get_queryset(self):
         return get_user_model().objects.filter(id=self.request.user.id)
-    
+
     @action(detail=False, methods=['get', 'patch'])
     def me(self, request):
         if request.method == 'GET':
@@ -722,19 +733,19 @@ class UserViewSet(viewsets.ModelViewSet):
                 serializer.save()
                 return Response(serializer.data)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     @action(detail=False, methods=['post'], url_path='me/change-password')
     def change_password(self, request):
         user = request.user
         current_password = request.data.get('current_password')
         new_password = request.data.get('new_password')
-        
+
         if not current_password or not new_password:
             return Response(
-                {'error': 'Les deux mots de passe sont requis'}, 
+                {'error': 'Les deux mots de passe sont requis'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         if not user.check_password(current_password):
             return Response(
                 {'error': 'Mot de passe actuel incorrect'},
@@ -804,7 +815,7 @@ class ProjectCollaboratorViewSet(viewsets.ModelViewSet):
 class ProjectInvitationViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectInvitationSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
         return ProjectInvitation.objects.filter(
             models.Q(project__created_by=self.request.user) |
@@ -851,16 +862,16 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):
         invitation = self.get_object()
-        
+
         if invitation.invited_email != request.user.email:
             raise PermissionDenied("Cette invitation ne vous est pas destinée")
-        
+
         if invitation.status != 'pending':
             raise serializers.ValidationError("Cette invitation n'est plus valide")
-            
+
         if invitation.is_expired():
             raise serializers.ValidationError("Cette invitation a expiré")
-            
+
         try:
             invitation.accept(request.user)
             return Response({"message": "Invitation acceptée avec succès"})
@@ -873,14 +884,14 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         invitation = self.get_object()
-        
+
         if invitation.invited_email != request.user.email:
             raise PermissionDenied("Cette invitation ne vous est pas destinée")
-            
+
         if invitation.status != 'pending':
             raise serializers.ValidationError("Cette invitation n'est plus valide")
-            
+
         invitation.status = 'rejected'
         invitation.save()
-        
+
         return Response({"message": "Invitation rejetée"})

@@ -1,27 +1,28 @@
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenVerifyView
+
 from .views import (
-    ProjectViewSet,
+    AdminUserViewSet,
+    AnnotationHistoryViewSet,
     AnnotationViewSet,
     CommunityAnnotationViewSet,
-    NotificationViewSet,
-    AnnotationHistoryViewSet,
-    detect_objects,
-    MyTokenObtainPairView,
     CookieTokenRefreshView,
-    LogoutView,
-    register_user,
-    UserViewSet,
-    DatasetViewSet,
     DataItemViewSet,
-    upload_and_detect,
-    save_annotations,
-    get_annotations_for_review,
-    validate_annotation,
+    DatasetViewSet,
+    LogoutView,
+    MyTokenObtainPairView,
+    NotificationViewSet,
     ProjectCollaboratorViewSet,
     ProjectInvitationViewSet,
-    AdminUserViewSet,
+    ProjectViewSet,
+    UserViewSet,
+    detect_objects,
+    get_annotations_for_review,
+    register_user,
+    save_annotations,
+    upload_and_detect,
+    validate_annotation,
 )
 
 router = DefaultRouter()
@@ -44,7 +45,7 @@ urlpatterns = [
     path('token/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('token/logout/', LogoutView.as_view(), name='token_logout'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
-    
+
     # Routes spécifiques AVANT le router : Django s'arrête à la première route qui
     # correspond, et 'annotations/<pk>/' du router capturerait 'review' comme pk.
     path('annotations/review/', get_annotations_for_review, name='get_annotations_for_review'),

@@ -1,7 +1,7 @@
 from django.contrib.auth.models import AbstractUser, Group, Permission
 from django.db import models
-from django.contrib.auth import get_user_model
 from django.utils import timezone
+
 
 class User(AbstractUser):
     ROLE_CHOICES = [
@@ -34,7 +34,7 @@ class Project(models.Model):
     published_at = models.DateTimeField(null=True, blank=True)
     tags = models.CharField(max_length=500, blank=True)  # Stocké comme une chaîne JSON de tags
     allow_community_annotations = models.BooleanField(default=True)
-    
+
     def publish(self):
         from django.utils import timezone
         self.status = 'published'
@@ -80,11 +80,14 @@ class Annotation(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     is_validated = models.BooleanField(default=False)
-    validation_status = models.CharField(max_length=20, choices=[("validé", "Validé"), ("rejeté", "Rejeté")], null=True, blank=True)
+    validation_status = models.CharField(
+        max_length=20, choices=[("validé", "Validé"), ("rejeté", "Rejeté")], null=True, blank=True)
     validation_comment = models.TextField(null=True, blank=True)
-    validated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="validated_annotations")
+    validated_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="validated_annotations")
     validated_at = models.DateTimeField(null=True, blank=True)
-    last_modified_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="last_modified_annotations")
+    last_modified_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="last_modified_annotations")
     last_modified_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -104,10 +107,10 @@ class Annotation(models.Model):
             old_instance = Annotation.objects.get(pk=self.pk)
             super().save(*args, **kwargs)
             # Créer une entrée dans l'historique pour la modification
-            if (old_instance.label != self.label or 
-                old_instance.x_min != self.x_min or 
-                old_instance.y_min != self.y_min or 
-                old_instance.x_max != self.x_max or 
+            if (old_instance.label != self.label or
+                old_instance.x_min != self.x_min or
+                old_instance.y_min != self.y_min or
+                old_instance.x_max != self.x_max or
                 old_instance.y_max != self.y_max):
                 AnnotationHistory.objects.create(
                     annotation=self,
@@ -131,14 +134,14 @@ class AnnotationHistory(models.Model):
     modified_by = models.ForeignKey(User, on_delete=models.CASCADE)
     modified_at = models.DateTimeField(auto_now_add=True)
     modification_type = models.CharField(max_length=20, choices=MODIFICATION_TYPES)
-    
+
     # Anciennes valeurs
     previous_label = models.CharField(max_length=100, null=True, blank=True)
     previous_x_min = models.FloatField(null=True, blank=True)
     previous_y_min = models.FloatField(null=True, blank=True)
     previous_x_max = models.FloatField(null=True, blank=True)
     previous_y_max = models.FloatField(null=True, blank=True)
-    
+
     comment = models.TextField(null=True, blank=True)
 
     class Meta:
@@ -150,7 +153,8 @@ class AnnotationHistory(models.Model):
 
 class CommunityAnnotation(models.Model):
     dataitem = models.ForeignKey(DataItem, on_delete=models.CASCADE)
-    parent_annotation = models.ForeignKey(Annotation, null=True, blank=True, on_delete=models.SET_NULL, related_name='community_responses')
+    parent_annotation = models.ForeignKey(
+        Annotation, null=True, blank=True, on_delete=models.SET_NULL, related_name='community_responses')
     created_by = models.ForeignKey(User, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
     content = models.TextField()
@@ -202,7 +206,7 @@ class Notification(models.Model):
         ('annotation_flagged', 'Annotation signalée'),
         ('project_invitation', 'Invitation à un projet'),
     ]
-    
+
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES)
     content = models.TextField()

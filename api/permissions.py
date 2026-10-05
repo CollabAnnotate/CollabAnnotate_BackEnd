@@ -1,5 +1,5 @@
 from django.db.models import Q
-from rest_framework.permissions import BasePermission, SAFE_METHODS
+from rest_framework.permissions import SAFE_METHODS, BasePermission
 
 # Rôles de collaborateur (ProjectCollaborator.role) autorisés par type d'action
 EDITOR_ROLES = ('editor', 'admin')
