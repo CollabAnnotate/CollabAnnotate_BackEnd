@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "backend.settings"
 python_files = ["test_*.py"]
-testpaths = ["api/tests", ".claude/hooks"]
+testpaths = ["api/tests"]
 addopts = "--reuse-db --strict-markers"
 
 [tool.coverage.run]
