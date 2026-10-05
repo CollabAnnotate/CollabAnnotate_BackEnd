@@ -1,11 +1,22 @@
-from rest_framework import serializers
-from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
-from .models import Project, Dataset, DataItem, Annotation, AnnotationHistory, CommunityAnnotation, ProjectVersion, Notification, ProjectCollaborator, ProjectInvitation
-from django.conf import settings
 from django.utils import timezone
-from .permissions import has_project_role, EDITOR_ROLES, ANNOTATOR_ROLES
+from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
+
+from .models import (
+    Annotation,
+    AnnotationHistory,
+    CommunityAnnotation,
+    DataItem,
+    Dataset,
+    Notification,
+    Project,
+    ProjectCollaborator,
+    ProjectInvitation,
+    ProjectVersion,
+)
+from .permissions import ANNOTATOR_ROLES, EDITOR_ROLES, has_project_role
 
 User = get_user_model()
 
@@ -15,7 +26,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio', 'profile_picture']
+        fields = ['id', 'username', 'email', 'password', 'password2', 'first_name', 'last_name', 'role', 'bio',
+                  'profile_picture']
         # Le rôle donne des droits (validation, accès admin) : jamais modifiable par
         # l'utilisateur lui-même. Il s'attribue via l'interface /admin/ de Django.
         read_only_fields = ['id', 'role']
@@ -178,7 +190,7 @@ class AnnotationSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user:
             validated_data['last_modified_by'] = request.user
-        
+
         return super().update(instance, validated_data)
 
     def validate(self, data):
@@ -200,16 +212,16 @@ class AnnotationSerializer(serializers.ModelSerializer):
 class AnnotationHistorySerializer(serializers.ModelSerializer):
     modified_by_username = serializers.CharField(source='modified_by.username', read_only=True)
     modified_at = serializers.DateTimeField(format="%Y-%m-%d %H:%M:%S", read_only=True)
-    
+
     class Meta:
         model = AnnotationHistory
         fields = [
-            'id', 
-            'annotation', 
-            'previous_label', 
-            'previous_x_min', 
-            'previous_y_min', 
-            'previous_x_max', 
+            'id',
+            'annotation',
+            'previous_label',
+            'previous_x_min',
+            'previous_y_min',
+            'previous_x_max',
             'previous_y_max',
             'modified_by',
             'modified_by_username',
@@ -220,7 +232,7 @@ class AnnotationHistorySerializer(serializers.ModelSerializer):
 
 class CommunityAnnotationSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
-    
+
     class Meta:
         model = CommunityAnnotation
         fields = [
@@ -283,7 +295,7 @@ class ProjectInvitationSerializer(serializers.ModelSerializer):
         # Vérifier si l'email existe déjà comme collaborateur du projet
         project = data.get('project')
         invited_email = data.get('invited_email')
-        
+
         if ProjectCollaborator.objects.filter(
             project=project,
             user__email=invited_email
@@ -291,7 +303,7 @@ class ProjectInvitationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Cet utilisateur est déjà collaborateur du projet"
             )
-        
+
         # Vérifier si une invitation en attente existe déjà
         if ProjectInvitation.objects.filter(
             project=project,
@@ -301,7 +313,7 @@ class ProjectInvitationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Une invitation est déjà en attente pour cet email"
             )
-        
+
         return data
 
     def get_expires_in(self, obj):

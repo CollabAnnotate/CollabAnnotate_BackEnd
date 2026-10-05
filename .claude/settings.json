@@ -1,0 +1,70 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pytest:*)",
+      "Bash(venv/Scripts/python.exe -m pytest:*)",
+      "Bash(ruff check:*)",
+      "Bash(venv/Scripts/python.exe -m ruff check:*)",
+      "Bash(python manage.py makemigrations --check:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)"
+    ],
+    "deny": [
+      "Read(./.env)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"Dépôt CollabAnnotate_BackEnd - branche : $(git branch --show-current)\"; gh pr view --json number,title,url --jq '\"PR ouverte : #\\(.number) \\(.title) \\(.url)\"' 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,re;sys.stderr.reconfigure(encoding='utf-8');c=json.load(sys.stdin).get('tool_input',{}).get('command','');b=re.search(r'git\\s+push\\b[^;&|]*(\\s|:)(main|master)(\\s|$)|git\\s+push\\b[^;&|]*\\s(--force|-f)(\\s|$)|--no-verify|gh\\s+pr\\s+merge(?![^;&|]*--squash)|git\\s+add\\b[^;&|]*(\\.env(?!\\.example)|\\.pt\\b|media/)',c);b and (print('Bloqué par le hook : push sur main, --force, --no-verify, merge sans --squash ou ajout de .env / .pt / media interdits.',file=sys.stderr),sys.exit(2))\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,re;sys.stderr.reconfigure(encoding='utf-8');p=json.load(sys.stdin).get('tool_input',{}).get('file_path','');re.search(r'(^|[\\\\/])\\.env(\\.(?!example$)[^\\\\/]*)?$',p) and (print('Bloqué par le hook : les fichiers .env se modifient à la main.',file=sys.stderr),sys.exit(2))\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,os,subprocess;sys.stderr.reconfigure(encoding='utf-8');p=json.load(sys.stdin).get('tool_input',{}).get('file_path','');v=os.path.join(os.environ.get('CLAUDE_PROJECT_DIR','.'),'venv','Scripts','python.exe');r=subprocess.run([v,'-m','ruff','check','--fix','--quiet','--force-exclude',p],capture_output=True,text=True) if p.endswith('.py') and os.path.exists(v) else None;r and r.returncode and (print('ruff :',r.stdout,file=sys.stderr),sys.exit(2))\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

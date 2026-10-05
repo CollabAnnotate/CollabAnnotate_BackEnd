@@ -14,3 +14,14 @@ media/
 # IDE
 .vscode/
 .idea/
+uploads/
+
+# Poids YOLO : téléchargés automatiquement par ultralytics au premier usage
+*.pt
+
+# Tests et outils
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/

@@ -1,0 +1,32 @@
+[project]
+name = "collabannotate-backend"
+version = "0.1.0"
+description = "API Django REST de CollabAnnotate : annotation collaborative d'images avec pré-détection YOLOv8"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "backend.settings"
+python_files = ["test_*.py"]
+testpaths = ["api/tests"]
+addopts = "--reuse-db --strict-markers"
+
+[tool.coverage.run]
+source = ["api", "backend"]
+omit = ["*/migrations/*", "*/tests/*", "manage.py", "backend/asgi.py", "backend/wsgi.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["migrations", "venv"]
+
+[tool.ruff.lint]
+# E/W : style PEP 8, F : erreurs (imports inutilisés, noms indéfinis), I : ordre des imports
+select = ["E", "W", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Les classes de test reprises de l'ancien tests.py gardent leur mise en forme d'origine
+"api/tests/*" = ["E501"]
