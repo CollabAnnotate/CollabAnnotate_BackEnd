@@ -5,8 +5,13 @@ description: Étape 4 du workflow TDD backend — fait relire la branche par /co
 
 # Review de la branche
 
-## 1. Revue automatique
-Lancer le skill intégré `/code-review` sur le diff de la branche par rapport à `main` (`git diff main...HEAD`).
+## 1. Revues automatiques (en parallèle)
+Dans un même message, lancer :
+- l'agent **`security-reviewer`** (droits par projet, escalade, fuites, entrées) ;
+- l'agent **`test-reviewer`** (tests ↔ plan validé ↔ critères de l'issue) ;
+- le skill intégré **`/code-review`** sur le diff de la branche (`git diff main...HEAD`).
+
+Ces relecteurs ont un contexte neuf : ils ne partagent pas les angles morts de l'auteur. Ils ne modifient rien. Fusionner leurs rapports en dédoublonnant.
 
 ## 2. Checklist CollabAnnotate (vérifier chaque point sur le diff)
 - [ ] **Droits** : tout nouveau queryset filtré par `visible_projects_q` ; écritures contrôlées par `has_project_role` ; aucun champ donnant des droits modifiable ; pas de `try/except Exception` autour de `get_object()`/`is_valid()`.

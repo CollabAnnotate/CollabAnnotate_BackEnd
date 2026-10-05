@@ -12,6 +12,15 @@ Chaque changement part d'une **GitHub Issue** et suit les skills du dépôt, dan
 4. `/review` — `/code-review` + checklist du dépôt (✋ validation)
 5. `/merge` — PR, CI verte, squash-merge (✋ validation)
 
+### Hooks et agents (`.claude/hooks/`, `.claude/agents/`)
+- **Hooks** (déclarés dans `.claude/settings.json`, testés par `.claude/hooks/test_hooks.py`) :
+  - `guard_bash.py` bloque le push sur `main`, `--force`, `--no-verify`, `git add` de `.env` / `.pt` / `media/` et un merge autrement qu'en squash ;
+  - `guard_files.py` protège `.env` et les migrations déjà publiées ;
+  - `format_python.py` passe ruff sur chaque fichier modifié ;
+  - `session_context.py` rappelle la branche, l'issue et la PR en début de session.
+- **Agents de review** (lecture seule, lancés par `/review`) : `security-reviewer` et `test-reviewer`.
+- Ils ne s'appliquent que si Claude Code est lancé **depuis ce dossier**.
+
 Branches : `feat/<n>-slug`, `fix/<n>-slug`, `chore/<n>-slug` depuis `main`. Commits en Conventional Commits, messages en français. Ne jamais pousser sur `main` directement ni merger sans accord explicite.
 
 ## Commandes (Windows / PowerShell)
