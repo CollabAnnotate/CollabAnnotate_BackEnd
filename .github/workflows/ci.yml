@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check .
+
+  tests:
+    name: Tests (pytest + PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: collabannotate
+          POSTGRES_USER: collab
+          POSTGRES_PASSWORD: collab
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U collab -d collabannotate"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SECRET_KEY: ci-secret-key-not-for-production
+      DEBUG: "False"
+      DATABASE_URL: postgres://collab:collab@localhost:5432/collabannotate
+      # Torch en version CPU : bien plus léger que la version CUDA par défaut
+      PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Installer les dépendances
+        run: pip install -r requirements-dev.txt
+      - name: Migrations à jour
+        run: python manage.py makemigrations --check --dry-run
+      - name: Tests et couverture
+        run: pytest --create-db --cov --cov-report=term --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
