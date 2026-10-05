@@ -832,19 +832,9 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
         # Pas de try/except global : DRF renvoie lui-même 400 (ValidationError)
         # et 403 (PermissionDenied) ; les intercepter les transformait en 500.
         serializer = self.get_serializer(data=request.data)
+        # Seuls le créateur du projet et ses collaborateurs admin invitent (validate_project)
         serializer.is_valid(raise_exception=True)
-
         project = serializer.validated_data['project']
-
-        # Seuls le créateur du projet et ses collaborateurs admin invitent
-        is_creator = project.created_by == request.user
-        is_admin = ProjectCollaborator.objects.filter(
-            project=project,
-            user=request.user,
-            role='admin'
-        ).exists()
-        if not (is_creator or is_admin):
-            raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
 
         invitation = serializer.save(
             invited_by=request.user,
@@ -878,7 +868,9 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
         if invitation.is_expired():
             raise serializers.ValidationError("Cette invitation a expiré")
 
-        invitation.accept(request.user)
+        # Faux si une requête concurrente l'a traitée ou supprimée entre-temps
+        if not invitation.accept(request.user):
+            raise serializers.ValidationError("Cette invitation n'est plus valide")
         return Response({"message": "Invitation acceptée avec succès"})
 
     @action(detail=True, methods=['post'])
@@ -891,7 +883,6 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
         if invitation.status != 'pending':
             raise serializers.ValidationError("Cette invitation n'est plus valide")
 
-        invitation.status = 'rejected'
-        invitation.save()
-
+        if not invitation.reject():
+            raise serializers.ValidationError("Cette invitation n'est plus valide")
         return Response({"message": "Invitation rejetée"})
