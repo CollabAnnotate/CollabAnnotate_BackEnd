@@ -1,6 +1,11 @@
 """Invitations, notifications et droits sur les ressources d'un projet."""
 
+from datetime import timedelta
+
+import pytest
+from django.db import DatabaseError
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -15,6 +20,13 @@ from api.models import (
     ProjectCollaborator,
     ProjectInvitation,
     User,
+)
+
+from .factories import (
+    ProjectCollaboratorFactory,
+    ProjectFactory,
+    ProjectInvitationFactory,
+    UserFactory,
 )
 
 
@@ -218,3 +230,188 @@ class ProjectResourcesSecurityTests(APITestCase):
         # Le propriétaire du projet peut modérer
         self.client.force_authenticate(user=self.owner)
         self.assertEqual(self.client.delete(url).status_code, status.HTTP_204_NO_CONTENT)
+
+
+# --- Invitations : pas de modification, suppression réservée, acceptation atomique (#3) ---
+
+@pytest.fixture
+def guest(db):
+    return UserFactory()
+
+
+@pytest.fixture
+def invitation(project, guest):
+    """Invitation en attente de `guest` sur `project` (propriété de `user`), rôle lecteur."""
+    return ProjectInvitationFactory(project=project, invited_email=guest.email, role='viewer')
+
+
+def invitation_url(invitation, action=None):
+    if action:
+        return reverse(f'project-invitation-{action}', args=[invitation.id])
+    return reverse('project-invitation-detail', args=[invitation.id])
+
+
+@pytest.mark.django_db
+def test_invite_ne_peut_pas_modifier_son_invitation(api_client, guest, invitation):
+    autre_projet = ProjectFactory()
+    api_client.force_authenticate(user=guest)
+
+    response = api_client.patch(invitation_url(invitation),
+                                {'role': 'admin', 'project': autre_projet.id}, format='json')
+
+    assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+    invitation.refresh_from_db()
+    assert invitation.role == 'viewer'
+    assert invitation.project_id != autre_projet.id
+
+
+@pytest.mark.django_db
+def test_attaque_patch_puis_accept_ne_donne_pas_admin(api_client, guest, invitation, project):
+    autre_projet = ProjectFactory()
+    api_client.force_authenticate(user=guest)
+
+    api_client.patch(invitation_url(invitation), {'role': 'admin', 'project': autre_projet.id}, format='json')
+    api_client.post(invitation_url(invitation, 'accept'))
+
+    assert not ProjectCollaborator.objects.filter(project=autre_projet, user=guest).exists()
+    assert ProjectCollaborator.objects.get(project=project, user=guest).role == 'viewer'
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('methode', ['put', 'patch'])
+def test_modification_d_invitation_interdite(auth_client, invitation, methode):
+    payload = {'project': invitation.project_id, 'invited_email': invitation.invited_email, 'role': 'admin'}
+
+    response = getattr(auth_client, methode)(invitation_url(invitation), payload, format='json')
+
+    assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+    invitation.refresh_from_db()
+    assert invitation.role == 'viewer'
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('qui', ['owner', 'guest'])
+def test_liste_et_detail_restent_accessibles(api_client, user, guest, invitation, qui):
+    api_client.force_authenticate(user=user if qui == 'owner' else guest)
+
+    liste = api_client.get(reverse('project-invitation-list'))
+    detail = api_client.get(invitation_url(invitation))
+
+    assert liste.status_code == status.HTTP_200_OK
+    assert [i['id'] for i in liste.data] == [invitation.id]
+    assert detail.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('role, attendu', [
+    ('owner', status.HTTP_204_NO_CONTENT),
+    ('admin', status.HTTP_204_NO_CONTENT),
+    ('editor', status.HTTP_404_NOT_FOUND),
+    ('guest', status.HTTP_403_FORBIDDEN),
+    ('stranger', status.HTTP_404_NOT_FOUND),
+    ('anonymous', status.HTTP_401_UNAUTHORIZED),
+])
+def test_suppression_d_invitation_selon_le_role(api_client, user, guest, project, invitation, role, attendu):
+    acteurs = {'owner': user, 'guest': guest, 'stranger': UserFactory()}
+    if role in ('admin', 'editor'):
+        acteurs[role] = ProjectCollaboratorFactory(project=project, role=role).user
+    if role != 'anonymous':
+        api_client.force_authenticate(user=acteurs[role])
+
+    response = api_client.delete(invitation_url(invitation))
+
+    assert response.status_code == attendu
+    supprimee = not ProjectInvitation.objects.filter(pk=invitation.pk).exists()
+    assert supprimee is (attendu == status.HTTP_204_NO_CONTENT)
+
+
+@pytest.mark.django_db
+def test_admin_du_projet_voit_les_invitations_du_projet(api_client, project, invitation):
+    admin = ProjectCollaboratorFactory(project=project, role='admin').user
+    api_client.force_authenticate(user=admin)
+
+    response = api_client.get(reverse('project-invitation-list'))
+
+    assert response.status_code == status.HTTP_200_OK
+    assert [i['id'] for i in response.data] == [invitation.id]
+
+
+@pytest.mark.django_db
+def test_accepter_cree_le_collaborateur_avec_le_role_d_origine(api_client, guest, project, invitation):
+    api_client.force_authenticate(user=guest)
+
+    response = api_client.post(invitation_url(invitation, 'accept'))
+
+    assert response.status_code == status.HTTP_200_OK
+    assert ProjectCollaborator.objects.get(project=project, user=guest).role == 'viewer'
+    invitation.refresh_from_db()
+    assert invitation.status == 'accepted'
+
+
+@pytest.mark.django_db
+def test_accepter_quand_deja_membre_ne_plante_pas(api_client, guest, project, invitation):
+    ProjectCollaboratorFactory(project=project, user=guest, role='editor')
+    api_client.force_authenticate(user=guest)
+
+    response = api_client.post(invitation_url(invitation, 'accept'))
+
+    assert response.status_code == status.HTTP_200_OK
+    membres = ProjectCollaborator.objects.filter(project=project, user=guest)
+    assert membres.count() == 1
+    assert membres.get().role == 'editor'
+    invitation.refresh_from_db()
+    assert invitation.status == 'accepted'
+
+
+@pytest.mark.django_db
+def test_acceptation_atomique(api_client, guest, project, invitation, monkeypatch):
+    def save_en_echec(self, *args, **kwargs):
+        raise DatabaseError('panne simulée')
+
+    monkeypatch.setattr(ProjectInvitation, 'save', save_en_echec)
+    # Le test porte sur l'état en base, pas sur le code d'erreur renvoyé
+    api_client.raise_request_exception = False
+    api_client.force_authenticate(user=guest)
+
+    api_client.post(invitation_url(invitation, 'accept'))
+
+    assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
+    invitation.refresh_from_db()
+    assert invitation.status == 'pending'
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('champs', [
+    {'expires_at': timezone.now() - timedelta(days=1)},
+    {'status': 'accepted'},
+], ids=['expiree', 'deja_traitee'])
+def test_accepter_une_invitation_expiree_ou_deja_traitee(api_client, guest, project, champs):
+    invitation = ProjectInvitationFactory(project=project, invited_email=guest.email, **champs)
+    api_client.force_authenticate(user=guest)
+
+    response = api_client.post(invitation_url(invitation, 'accept'))
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert not ProjectCollaborator.objects.filter(project=project, user=guest).exists()
+
+
+@pytest.mark.django_db
+def test_etranger_ne_peut_pas_accepter_l_invitation(api_client, project, invitation):
+    etranger = UserFactory()
+    api_client.force_authenticate(user=etranger)
+
+    response = api_client.post(invitation_url(invitation, 'accept'))
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert not ProjectCollaborator.objects.filter(project=project, user=etranger).exists()
+
+
+@pytest.mark.django_db
+def test_invite_peut_refuser(api_client, guest, invitation):
+    api_client.force_authenticate(user=guest)
+
+    response = api_client.post(invitation_url(invitation, 'reject'))
+
+    assert response.status_code == status.HTTP_200_OK
+    invitation.refresh_from_db()
+    assert invitation.status == 'rejected'
