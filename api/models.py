@@ -1,5 +1,5 @@
 from django.contrib.auth.models import AbstractUser, Group, Permission
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 
@@ -265,15 +265,44 @@ class ProjectInvitation(models.Model):
     def is_expired(self):
         return timezone.now() > self.expires_at
 
+    def _lock_if_pending(self):
+        """
+        Relit l'invitation sous verrou (SELECT ... FOR UPDATE) : une requête concurrente
+        (accept, reject, suppression) attend la fin de la transaction en cours.
+        Renvoie None si elle a disparu ou n'est plus en attente. À appeler dans un atomic().
+        """
+        locked = ProjectInvitation.objects.select_for_update().filter(pk=self.pk).first()
+        if locked is None or locked.status != 'pending' or locked.is_expired():
+            return None
+        return locked
+
     def accept(self, user):
-        if self.status == 'pending' and not self.is_expired():
-            ProjectCollaborator.objects.create(
-                project=self.project,
+        """
+        Ajoute l'invité au projet avec le rôle de l'invitation. Un membre existant garde
+        son rôle actuel. Tout ou rien : si l'invitation ne peut être enregistrée,
+        aucun collaborateur n'est créé.
+        """
+        with transaction.atomic():
+            locked = self._lock_if_pending()
+            if locked is None:
+                return False
+            ProjectCollaborator.objects.get_or_create(
+                project=locked.project,
                 user=user,
-                role=self.role,
-                added_by=self.invited_by
+                defaults={'role': locked.role, 'added_by': locked.invited_by},
             )
-            self.status = 'accepted'
-            self.save()
-            return True
-        return False
+            locked.status = 'accepted'
+            # update_fields : UPDATE seul, jamais de réinsertion d'une ligne supprimée
+            locked.save(update_fields=['status'])
+        self.status = 'accepted'
+        return True
+
+    def reject(self):
+        with transaction.atomic():
+            locked = self._lock_if_pending()
+            if locked is None:
+                return False
+            locked.status = 'rejected'
+            locked.save(update_fields=['status'])
+        self.status = 'rejected'
+        return True

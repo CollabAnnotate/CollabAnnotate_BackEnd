@@ -291,6 +291,12 @@ class ProjectInvitationSerializer(serializers.ModelSerializer):
                  'created_at', 'expires_at', 'status', 'expires_in']
         read_only_fields = ['status', 'token', 'created_at', 'expires_at', 'invited_by']
 
+    def validate_project(self, project):
+        # Vérifié avant validate() : un non-gestionnaire ne doit rien apprendre de l'équipe
+        if not has_project_role(self.context['request'].user, project, ('admin',)):
+            raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
+        return project
+
     def validate(self, data):
         # Vérifier si l'email existe déjà comme collaborateur du projet
         project = data.get('project')
