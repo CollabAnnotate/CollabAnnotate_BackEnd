@@ -4,16 +4,17 @@ Une application backend robuste pour la plateforme collaborative d'annotation d'
 
 ## 🚀 Technologies utilisées
 
-- Django 
+- Django 5.2 LTS
 - Django REST Framework
-- PostgreSQL
-- JWT Authentication
+- PostgreSQL 17 (via Docker Compose)
+- JWT Authentication (SimpleJWT)
+- YOLOv8 (ultralytics) pour la détection d'objets
 
 ## 📋 Prérequis
 
-- Python 3.8+
+- Python 3.12+
 - pip
-- PostgreSQL
+- Docker (pour PostgreSQL)
 
 ## 🛠 Installation
 
@@ -35,30 +36,27 @@ pip install -r requirements.txt
 ```
 
 4. Configurer les variables d'environnement
-Créer un fichier `.env` à la racine du projet avec :
-```
-DEBUG=True
-SECRET_KEY=votre_clé_secrète
-DB_NAME=votre_db_name
-DB_USER=votre_db_user
-DB_PASSWORD=votre_db_password
-DB_HOST=localhost
+Copier `.env.example` en `.env`, puis remplacer les valeurs `a-remplacer` (`SECRET_KEY`, `POSTGRES_PASSWORD` et le mot de passe dans `DATABASE_URL`) :
+```bash
+cp .env.example .env
 ```
 
-5. Appliquer les migrations
+5. Démarrer PostgreSQL
+```bash
+docker compose up -d
+```
 
-'''bash
-python manage.py makemigrations
-''' 
-
+6. Appliquer les migrations
 ```bash
 python manage.py migrate
 ```
 
-6. Lancer le serveur de développement
+7. Lancer le serveur de développement
 ```bash
 python manage.py runserver
 ```
+
+Lancer les tests : `python manage.py test api`.
 
 ## 🌟 Fonctionnalités principales
 

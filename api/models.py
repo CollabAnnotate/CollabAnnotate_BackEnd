@@ -11,6 +11,7 @@ class User(AbstractUser):
     ]
     role = models.CharField(max_length=15, choices=ROLE_CHOICES, default='annotateur')
     bio = models.TextField(blank=True)
+    profile_picture = models.ImageField(upload_to='avatars/', null=True, blank=True)
     groups = models.ManyToManyField(Group, related_name="api_user_groups", blank=True)
     user_permissions = models.ManyToManyField(Permission, related_name="api_user_permissions", blank=True)
 
@@ -199,6 +200,7 @@ class Notification(models.Model):
         ('new_response', 'Nouvelle réponse'),
         ('project_published', 'Projet publié'),
         ('annotation_flagged', 'Annotation signalée'),
+        ('project_invitation', 'Invitation à un projet'),
     ]
     
     user = models.ForeignKey(User, on_delete=models.CASCADE)

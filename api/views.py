@@ -1,19 +1,37 @@
 import os
+import secrets
+from datetime import timedelta
+from functools import lru_cache
 from rest_framework import generics, permissions, status, viewsets, serializers
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.contrib.auth import get_user_model
-from django.contrib.auth.hashers import make_password
-from ultralytics import YOLO
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
+from .permissions import (
+    AnnotationPermission,
+    CollaboratorPermission,
+    CommunityAnnotationPermission,
+    DataItemPermission,
+    DatasetPermission,
+    IsRoleAdmin,
+    ProjectPermission,
+    has_project_role,
+    visible_projects_q,
+)
 from .models import Project, Dataset, Annotation, AnnotationHistory, CommunityAnnotation, Notification, DataItem, ProjectCollaborator, ProjectInvitation
 from .serializers import (
-    UserSerializer, 
+    UserSerializer,
+    AdminUserSerializer,
     ProjectSerializer, 
     DatasetSerializer,
     AnnotationSerializer,
@@ -33,12 +51,20 @@ from django.db import models
 
 User = get_user_model()
 
+def set_refresh_cookie(response, refresh_token):
+    """Place le refresh token dans un cookie HttpOnly (voir JWT_REFRESH_COOKIE)."""
+    response.set_cookie(value=refresh_token, **settings.JWT_REFRESH_COOKIE)
+
+
+def delete_refresh_cookie(response):
+    cookie = settings.JWT_REFRESH_COOKIE
+    response.delete_cookie(cookie['key'], path=cookie['path'], samesite=cookie['samesite'])
+
+
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
+        # Le parent fournit déjà 'access' et 'refresh'
         data = super().validate(attrs)
-        refresh = self.get_token(self.user)
-        data['access'] = str(refresh.access_token)
-        data['refresh'] = str(refresh)
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
@@ -48,17 +74,59 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 class MyTokenObtainPairView(TokenObtainPairView):
+    """Connexion : l'access token est renvoyé en JSON, le refresh token en cookie HttpOnly."""
     serializer_class = MyTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        set_refresh_cookie(response, response.data.pop('refresh'))
+        return response
+
+
+class CookieTokenRefreshView(TokenRefreshView):
+    """Refresh : lit le refresh token dans le cookie et le fait tourner (rotation + blacklist)."""
+
+    def post(self, request, *args, **kwargs):
+        refresh = request.COOKIES.get(settings.JWT_REFRESH_COOKIE['key'])
+        if not refresh:
+            raise InvalidToken('Aucun refresh token')
+
+        serializer = self.get_serializer(data={'refresh': refresh})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            raise InvalidToken(e.args[0]) from e
+
+        data = dict(serializer.validated_data)
+        new_refresh = data.pop('refresh', None)
+        response = Response(data, status=status.HTTP_200_OK)
+        if new_refresh:
+            set_refresh_cookie(response, new_refresh)
+        return response
+
+
+class LogoutView(APIView):
+    """Déconnexion : blackliste le refresh token du cookie puis supprime le cookie."""
+    authentication_classes = ()
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        refresh = request.COOKIES.get(settings.JWT_REFRESH_COOKIE['key'])
+        if refresh:
+            try:
+                RefreshToken(refresh).blacklist()
+            except TokenError:
+                pass  # déjà expiré ou blacklisté : rien à révoquer
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        delete_refresh_cookie(response)
+        return response
 
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register_user(request):
     try:
-        # Assurez-vous que le rôle est en minuscules
-        if 'role' in request.data and isinstance(request.data['role'], str):
-            request.data['role'] = request.data['role'].lower()
-        
+        # Le rôle envoyé est ignoré (read_only) : tout nouvel inscrit est annotateur
         serializer = UserSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({
@@ -67,10 +135,8 @@ def register_user(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         user = serializer.save()
-        
-        # Générer un token JWT pour l'utilisateur
-        refresh = RefreshToken.for_user(user)
-        
+
+        # Pas de tokens ici : l'utilisateur se connecte ensuite via token/
         return Response({
             "status": "success",
             "user": {
@@ -78,10 +144,6 @@ def register_user(request):
                 "username": user.username,
                 "email": user.email,
                 "role": user.role
-            },
-            "token": {
-                "refresh": str(refresh),
-                "access": str(refresh.access_token),
             },
             "message": "Utilisateur créé avec succès"
         }, status=status.HTTP_201_CREATED)
@@ -136,31 +198,34 @@ class DatasetDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 class DatasetViewSet(viewsets.ModelViewSet):
     serializer_class = DatasetSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : DatasetSerializer.validate_project ; modification : DatasetPermission
+    permission_classes = [permissions.IsAuthenticated, DatasetPermission]
     queryset = Dataset.objects.all()
 
     def get_queryset(self):
+        """Mêmes règles de visibilité que les projets."""
         return Dataset.objects.filter(
-            Q(project__visibility='public') | 
-            Q(project__created_by=self.request.user)
-        )
-
-    def perform_create(self, serializer):
-        serializer.save(project__created_by=self.request.user)
+            visible_projects_q(self.request.user, prefix='project__')
+        ).distinct()
 
 class DataItemViewSet(viewsets.ModelViewSet):
     serializer_class = DataItemSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : DataItemSerializer.validate_dataset ; modification : DataItemPermission
+    permission_classes = [permissions.IsAuthenticated, DataItemPermission]
     queryset = DataItem.objects.all()
 
     def get_queryset(self):
         return DataItem.objects.filter(
-            Q(dataset__project__visibility='public') | 
-            Q(dataset__project__created_by=self.request.user)
-        )
+            visible_projects_q(self.request.user, prefix='dataset__project__')
+        ).distinct()
 
 MODEL_PATH = "yolov8n.pt"
-model = YOLO(MODEL_PATH)
+
+@lru_cache(maxsize=1)
+def get_model():
+    """Charge le modèle YOLO au premier appel seulement (torch est lourd en mémoire)."""
+    from ultralytics import YOLO
+    return YOLO(MODEL_PATH)
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -174,6 +239,7 @@ def upload_and_detect(request):
         path = default_storage.save(file_path, ContentFile(image.read()))
         img_path = default_storage.path(path)
 
+        model = get_model()
         results = model(img_path)
         detected_objects = []
 
@@ -213,7 +279,7 @@ def detect_objects(request):
 
         try:
             # Faire la détection avec YOLO
-            results = model(full_path)
+            results = get_model()(full_path)
             
             # Convertir les résultats en format JSON
             detections = []
@@ -255,32 +321,26 @@ def detect_objects(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def save_annotations(request):
-    try:
-        annotations = request.data.get('annotations', [])
-        image_id = request.data.get('image_id')
-        
-        saved_annotations = []
-        for ann in annotations:
-            serializer = AnnotationSerializer(data={
-                'dataitem': ann.get('dataitem_id'),  # Assure-toi que ce champ est fourni
-                'image': image_id,
-                'label': ann.get('label'),
-                'x_min': ann.get('x_min'),
-                'y_min': ann.get('y_min'),
-                'x_max': ann.get('x_max'),
-                'y_max': ann.get('y_max'),
-                'confidence': ann.get('confidence')
-            }, context={'request': request})
-            
-            if serializer.is_valid():
-                serializer.save()
-                saved_annotations.append(serializer.data)
-            else:
-                return Response(serializer.errors, status=400)
+    # Pas de try/except global : un refus de permission (validate_dataitem) doit
+    # rester un 403, pas devenir une 500.
+    saved_annotations = []
+    for ann in request.data.get('annotations', []):
+        serializer = AnnotationSerializer(data={
+            'dataitem': ann.get('dataitem_id'),
+            'label': ann.get('label'),
+            'x_min': ann.get('x_min'),
+            'y_min': ann.get('y_min'),
+            'x_max': ann.get('x_max'),
+            'y_max': ann.get('y_max'),
+            'confidence': ann.get('confidence')
+        }, context={'request': request})
 
-        return Response(saved_annotations, status=201)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        saved_annotations.append(serializer.data)
+
+    return Response(saved_annotations, status=status.HTTP_201_CREATED)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -289,8 +349,12 @@ def get_annotations_for_review(request):
     if user.role not in ['verificateur', 'admin']:
         return Response({"error": "Permission refusée"}, status=403)
 
-    annotations = Annotation.objects.filter(is_validated=False)
-    serializer = AnnotationSerializer(annotations, many=True)
+    annotations = (
+        Annotation.objects.filter(is_validated=False)
+        .select_related('dataitem', 'created_by')
+        .order_by('created_at')
+    )
+    serializer = AnnotationSerializer(annotations, many=True, context={'request': request})
     return Response(serializer.data)
 
 @api_view(['POST'])
@@ -302,61 +366,47 @@ def validate_annotation(request, annotation_id):
 
     try:
         annotation = Annotation.objects.get(id=annotation_id)
-        status = request.data.get('status')
-        comment = request.data.get('comment', '')
-
-        if status not in ['validé', 'rejeté']:
-            return Response({"error": "Statut invalide"}, status=400)
-
-        annotation.is_validated = True
-        annotation.validation_status = status
-        annotation.validation_comment = comment
-        annotation.validated_by = user
-        annotation.save()
-
-        return Response({"message": "Annotation mise à jour avec succès"})
     except Annotation.DoesNotExist:
-        return Response({"error": "Annotation non trouvée"}, status=404)
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
+        return Response({"error": "Annotation non trouvée"}, status=status.HTTP_404_NOT_FOUND)
+
+    # Ne pas nommer cette variable `status` : elle masquerait le module rest_framework.status
+    validation_status = request.data.get('status')
+    if validation_status not in ['validé', 'rejeté']:
+        return Response({"error": "Statut invalide"}, status=status.HTTP_400_BAD_REQUEST)
+
+    annotation.is_validated = True
+    annotation.validation_status = validation_status
+    annotation.validation_comment = request.data.get('comment', '')
+    annotation.validated_by = user
+    annotation.validated_at = timezone.now()
+    annotation.save()
+
+    return Response({"message": "Annotation mise à jour avec succès"})
 
 class AnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = AnnotationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Création : AnnotationSerializer.validate_dataitem ; modification : AnnotationPermission
+    permission_classes = [permissions.IsAuthenticated, AnnotationPermission]
     queryset = Annotation.objects.all()
 
     def get_queryset(self):
+        """Annotations des projets visibles, y compris ceux où l'on collabore."""
         dataitem_id = self.request.query_params.get('dataitem', None)
         queryset = Annotation.objects.filter(
-            Q(created_by=self.request.user) | 
-            Q(dataitem__dataset__project__created_by=self.request.user)
-        )
-        
+            visible_projects_q(self.request.user, prefix='dataitem__dataset__project__')
+        ).distinct()
+
         if dataitem_id:
             queryset = queryset.filter(dataitem_id=dataitem_id)
-            
+
         return queryset
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
     def perform_update(self, serializer):
-        instance = self.get_object()
-        
-        # Créer une entrée dans l'historique avant la mise à jour
-        AnnotationHistory.objects.create(
-            annotation=instance,
-            previous_label=instance.label,
-            previous_x_min=instance.x_min,
-            previous_y_min=instance.y_min,
-            previous_x_max=instance.x_max,
-            previous_y_max=instance.y_max,
-            modified_by=self.request.user,
-            modification_type=self.request.data.get('modification_type', 'manual')
-        )
-        
-        # Mettre à jour l'annotation
-        return serializer.save(
+        # L'historique est écrit par Annotation.save() : ne pas le dupliquer ici
+        serializer.save(
             last_modified_by=self.request.user,
             last_modified_at=timezone.now()
         )
@@ -371,8 +421,17 @@ class AnnotationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def restore(self, request, pk=None):
         annotation = self.get_object()
-        history = AnnotationHistory.objects.filter(annotation=annotation).latest('modified_at')
-        
+        # Seules les modifications conservent un état précédent (l'entrée « create » est vide)
+        history = (
+            AnnotationHistory.objects.filter(annotation=annotation, modification_type='update')
+            .order_by('-modified_at')
+            .first()
+        )
+        if history is None:
+            return Response({"error": "Aucune version précédente à restaurer"},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        annotation.last_modified_by = request.user
         annotation.label = history.previous_label
         annotation.x_min = history.previous_x_min
         annotation.y_min = history.previous_y_min
@@ -389,8 +448,11 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         annotation_id = self.request.query_params.get('annotation', None)
-        queryset = super().get_queryset()
-        
+        # Uniquement l'historique des projets visibles (auparavant : tout l'historique)
+        queryset = super().get_queryset().filter(
+            visible_projects_q(self.request.user, prefix='annotation__dataitem__dataset__project__')
+        ).distinct()
+
         if annotation_id:
             queryset = queryset.filter(annotation_id=annotation_id)
             
@@ -398,19 +460,36 @@ class AnnotationHistoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ProjectViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # Être visible ne suffit pas pour modifier : voir api/permissions.py
+    permission_classes = [permissions.IsAuthenticated, ProjectPermission]
     parser_classes = (MultiPartParser, FormParser, JSONParser)
     queryset = Project.objects.all()
 
     def get_queryset(self):
-        user = self.request.user
-        return Project.objects.filter(
-            Q(created_by=user) | 
-            Q(status='published')
+        """Projets visibles : les siens, ceux où l'on collabore, et les projets publiés."""
+        visible_ids = Project.objects.filter(visible_projects_q(self.request.user)).values('id')
+        # Compteurs calculés en SQL (GROUP BY) pour tous les projets d'un coup,
+        # plutôt qu'une requête par projet (problème N+1)
+        return (
+            Project.objects.filter(id__in=visible_ids)
+            .select_related('created_by')
+            .annotate(
+                total_images=models.Count('dataset__dataitem', distinct=True),
+                total_annotations=models.Count('dataset__dataitem__annotation', distinct=True),
+                pending_annotations=models.Count(
+                    'dataset__dataitem__annotation',
+                    filter=Q(dataset__dataitem__annotation__is_validated=False),
+                    distinct=True,
+                ),
+            )
+            .order_by('-created_at')
         )
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        project = serializer.save(created_by=self.request.user)
+        # « Public » à la création = publié (visibility/status sont en lecture seule)
+        if self.request.data.get('visibility') == 'public':
+            project.publish()
 
     @action(detail=True, methods=['POST'])
     def add_images(self, request, pk=None):
@@ -462,46 +541,57 @@ class ProjectViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['GET'])
     def stats(self, request, pk=None):
         project = self.get_object()
-        datasets = Dataset.objects.filter(project=project)
-        dataitems = DataItem.objects.filter(dataset__in=datasets)
-        annotations = Annotation.objects.filter(dataitem__in=dataitems)
+        dataitems = DataItem.objects.filter(dataset__project=project)
+        annotations = Annotation.objects.filter(dataitem__dataset__project=project)
         collaborators = ProjectCollaborator.objects.filter(project=project)
 
+        total_images = dataitems.count()
+        accepted = annotations.filter(validation_status='validé').count()
+        rejected = annotations.filter(validation_status='rejeté').count()
+        pending = annotations.filter(is_validated=False).count()
+        annotated_images = dataitems.filter(annotation__isnull=False).distinct().count()
+        avg_confidence = annotations.aggregate(avg=models.Avg('confidence'))['avg']
+
         stats = {
-            'total_images': dataitems.count(),
+            'total_images': total_images,
             'total_annotations': annotations.count(),
-            'pending_annotations': annotations.filter(is_validated=False).count(),
+            'pending_annotations': pending,
             'total_collaborators': collaborators.count() + 1,  # +1 pour inclure le créateur
             'validated_annotations': annotations.filter(is_validated=True).count(),
-            'rejected_annotations': annotations.filter(validation_status='rejeté').count(),
+            'rejected_annotations': rejected,
+            # Données prêtes pour les graphiques de l'écran Rapports
+            'annotations_by_label': [
+                {'name': row['label'], 'value': row['count']}
+                for row in annotations.values('label')
+                .annotate(count=models.Count('id'))
+                .order_by('-count')
+            ],
+            'validation_breakdown': [
+                {'name': 'Validées', 'value': accepted},
+                {'name': 'Rejetées', 'value': rejected},
+                {'name': 'En attente', 'value': pending},
+            ],
+            # Indicateurs mesurables sans vérité terrain (None si pas encore de données)
+            'quality': {
+                'acceptance_rate': accepted / (accepted + rejected) if accepted + rejected else None,
+                'average_confidence': avg_confidence,
+                'completion_rate': annotated_images / total_images if total_images else None,
+            },
         }
 
         return Response(stats)
 
     @action(detail=True, methods=['POST'])
     def publish(self, request, pk=None):
+        # Réservé au propriétaire : contrôlé par ProjectPermission dans get_object()
         project = self.get_object()
-        if project.created_by != request.user:
-            return Response(
-                {'error': 'Non autorisé'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        project.status = 'published'
-        project.save()
+        project.publish()  # met aussi à jour visibility et published_at
         return Response({'status': 'published'})
 
     @action(detail=True, methods=['POST'])
     def unpublish(self, request, pk=None):
         project = self.get_object()
-        if project.created_by != request.user:
-            return Response(
-                {'error': 'Non autorisé'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
-        project.status = 'draft'
-        project.save()
+        project.unpublish()
         return Response({'status': 'draft'})
 
     @action(detail=True, methods=['POST'])
@@ -509,8 +599,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
         """
         Détecte les objets dans une image spécifique
         """
+        # Hors du try : un refus de permission doit donner 403, pas 500
+        project = self.get_object()
         try:
-            project = self.get_object()
             image_id = request.data.get('image_id')
             if not image_id:
                 return Response({"error": "ID de l'image requis"}, status=400)
@@ -519,6 +610,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             image_path = data_item.image.path
             
             # Utiliser YOLO pour détecter les objets
+            model = get_model()
             results = model(image_path)
             detected_objects = []
             
@@ -543,7 +635,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 class CommunityAnnotationViewSet(viewsets.ModelViewSet):
     serializer_class = CommunityAnnotationSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, CommunityAnnotationPermission]
     queryset = CommunityAnnotation.objects.all()
 
     def get_queryset(self):
@@ -555,7 +647,7 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         dataitem = serializer.validated_data['dataitem']
         project = dataitem.dataset.project
         
-        if not project.visibility == 'public':
+        if project.visibility != 'public' or not project.allow_community_annotations:
             raise PermissionDenied(
                 "Ce projet n'accepte pas les annotations communautaires"
             )
@@ -590,7 +682,8 @@ class CommunityAnnotationViewSet(viewsets.ModelViewSet):
         
         return Response({"status": "flagged"})
 
-class NotificationViewSet(viewsets.ModelViewSet):
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """Les notifications sont créées par le système : l'utilisateur ne fait que les lire."""
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
     queryset = Notification.objects.all()
@@ -644,28 +737,62 @@ class UserViewSet(viewsets.ModelViewSet):
         
         if not user.check_password(current_password):
             return Response(
-                {'error': 'Mot de passe actuel incorrect'}, 
+                {'error': 'Mot de passe actuel incorrect'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        user.password = make_password(new_password)
+
+        # Mêmes règles de robustesse que partout ailleurs (AUTH_PASSWORD_VALIDATORS)
+        try:
+            validate_password(new_password, user)
+        except DjangoValidationError as e:
+            return Response({'error': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
         user.save()
         return Response({'message': 'Mot de passe modifié avec succès'})
 
+
+class AdminUserViewSet(viewsets.ModelViewSet):
+    """Gestion des comptes par les administrateurs (écran Utilisateurs)."""
+    serializer_class = AdminUserSerializer
+    permission_classes = [IsAuthenticated, IsRoleAdmin]
+    queryset = User.objects.all().order_by('username')
+
+    def perform_update(self, serializer):
+        # Garde-fou : un admin ne peut pas se retirer ses propres droits
+        if serializer.instance == self.request.user:
+            data = serializer.validated_data
+            if data.get('role', 'admin') != 'admin' or data.get('is_active') is False:
+                raise serializers.ValidationError(
+                    "Vous ne pouvez pas retirer vos propres droits d'administrateur."
+                )
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance == self.request.user:
+            raise serializers.ValidationError("Vous ne pouvez pas supprimer votre propre compte.")
+        instance.delete()
+
 class ProjectCollaboratorViewSet(viewsets.ModelViewSet):
     serializer_class = ProjectCollaboratorSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, CollaboratorPermission]
 
     def get_queryset(self):
-        return ProjectCollaborator.objects.filter(
-            models.Q(project__created_by=self.request.user) |
-            models.Q(user=self.request.user)
-        )
+        """L'équipe des projets dont on est propriétaire ou membre, filtrable par ?project=."""
+        user = self.request.user
+        queryset = ProjectCollaborator.objects.filter(
+            Q(project__created_by=user) | Q(project__collaborators__user=user)
+        ).select_related('user', 'project').distinct()
+
+        project_id = self.request.query_params.get('project')
+        if project_id:
+            queryset = queryset.filter(project_id=project_id)
+        return queryset
 
     def perform_create(self, serializer):
         project = serializer.validated_data['project']
-        if project.created_by != self.request.user:
-            raise PermissionDenied("Seul le créateur du projet peut ajouter des collaborateurs")
+        if not has_project_role(self.request.user, project, ('admin',)):
+            raise PermissionDenied("Seuls le propriétaire et les administrateurs du projet ajoutent des collaborateurs")
         serializer.save(added_by=self.request.user)
 
     @action(detail=False, methods=['get'])
@@ -685,59 +812,41 @@ class ProjectInvitationViewSet(viewsets.ModelViewSet):
         )
 
     def create(self, request, *args, **kwargs):
-        try:
-            serializer = self.get_serializer(data=request.data)
-            serializer.is_valid(raise_exception=True)
-            
-            project = serializer.validated_data['project']
-            invited_email = serializer.validated_data['invited_email']
-            
-            # Vérifier si l'utilisateur est le créateur du projet ou un admin
-            is_creator = project.created_by == request.user
-            is_admin = ProjectCollaborator.objects.filter(
-                project=project,
-                user=request.user,
-                role='admin'
-            ).exists()
-            
-            if not (is_creator or is_admin):
-                raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
-            
-            # Générer un token unique
-            import secrets
-            token = secrets.token_urlsafe(32)
-            
-            # Définir une date d'expiration (7 jours)
-            from django.utils import timezone
-            import datetime
-            expires_at = timezone.now() + datetime.timedelta(days=7)
-            
-            invitation = serializer.save(
-                invited_by=request.user,
-                token=token,
-                expires_at=expires_at,
-                status='pending'
+        # Pas de try/except global : DRF renvoie lui-même 400 (ValidationError)
+        # et 403 (PermissionDenied) ; les intercepter les transformait en 500.
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        project = serializer.validated_data['project']
+
+        # Seuls le créateur du projet et ses collaborateurs admin invitent
+        is_creator = project.created_by == request.user
+        is_admin = ProjectCollaborator.objects.filter(
+            project=project,
+            user=request.user,
+            role='admin'
+        ).exists()
+        if not (is_creator or is_admin):
+            raise PermissionDenied("Vous n'avez pas la permission d'inviter des collaborateurs sur ce projet")
+
+        invitation = serializer.save(
+            invited_by=request.user,
+            token=secrets.token_urlsafe(32),
+            expires_at=timezone.now() + timedelta(days=7),
+            status='pending'
+        )
+
+        # Notifier l'utilisateur invité s'il a déjà un compte
+        invited_user = get_user_model().objects.filter(email=invitation.invited_email).first()
+        if invited_user:
+            Notification.objects.create(
+                user=invited_user,
+                notification_type='project_invitation',
+                content=f"Vous avez été invité à collaborer sur le projet {project.name}",
+                related_project=project
             )
-            
-            # Créer une notification pour l'utilisateur invité s'il existe
-            User = get_user_model()
-            try:
-                invited_user = User.objects.get(email=invitation.invited_email)
-                Notification.objects.create(
-                    user=invited_user,
-                    type='project_invitation',
-                    message=f"Vous avez été invité à collaborer sur le projet {project.name}",
-                    related_project=project
-                )
-            except User.DoesNotExist:
-                pass
-                
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-            
-        except serializers.ValidationError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
     def accept(self, request, pk=None):
